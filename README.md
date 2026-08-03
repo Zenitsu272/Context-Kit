@@ -1,16 +1,18 @@
 # Context Kit
 
-Phase 1 MVP scaffold for a Chrome extension that saves AI conversations as reusable Context Packages.
+Context Kit is a Manifest V3 browser extension that saves AI conversations as reusable Context Packages and inserts curated context back into supported AI tools.
 
-Execution backlog: [docs/DEVELOPMENT_BACKLOG.md](D:/Vaishak%20Files/context_bridge/docs/DEVELOPMENT_BACKLOG.md)
-Phase 1 QA checklist: [docs/PHASE1_QA_CHECKLIST.md](D:/Vaishak%20Files/context_bridge/docs/PHASE1_QA_CHECKLIST.md)
-Backend scaffold: [backend/README.md](D:/Vaishak%20Files/context_bridge/backend/README.md)
-Privacy draft: [docs/PRIVACY_POLICY_DRAFT.md](D:/Vaishak%20Files/context_bridge/docs/PRIVACY_POLICY_DRAFT.md)
-Permissions note: [docs/PERMISSIONS_JUSTIFICATION.md](D:/Vaishak%20Files/context_bridge/docs/PERMISSIONS_JUSTIFICATION.md)
-Security and retention: [docs/SECURITY_AND_RETENTION.md](D:/Vaishak%20Files/context_bridge/docs/SECURITY_AND_RETENTION.md)
-Launch checklist: [docs/CHROME_WEB_STORE_LAUNCH_CHECKLIST.md](D:/Vaishak%20Files/context_bridge/docs/CHROME_WEB_STORE_LAUNCH_CHECKLIST.md)
-Listing draft: [docs/STORE_LISTING_DRAFT.md](D:/Vaishak%20Files/context_bridge/docs/STORE_LISTING_DRAFT.md)
-Publishing status: [docs/PUBLISHING_STATUS.md](D:/Vaishak%20Files/context_bridge/docs/PUBLISHING_STATUS.md)
+Useful project docs:
+
+- [Execution backlog](docs/DEVELOPMENT_BACKLOG.md)
+- [Phase 1 QA checklist](docs/PHASE1_QA_CHECKLIST.md)
+- [Backend scaffold](backend/README.md)
+- [Privacy draft](docs/PRIVACY_POLICY_DRAFT.md)
+- [Permissions note](docs/PERMISSIONS_JUSTIFICATION.md)
+- [Security and retention](docs/SECURITY_AND_RETENTION.md)
+- [Chrome Web Store launch checklist](docs/CHROME_WEB_STORE_LAUNCH_CHECKLIST.md)
+- [Store listing draft](docs/STORE_LISTING_DRAFT.md)
+- [Publishing status](docs/PUBLISHING_STATUS.md)
 
 ## What is included
 
@@ -31,28 +33,35 @@ Publishing status: [docs/PUBLISHING_STATUS.md](D:/Vaishak%20Files/context_bridge
 - Expanded sensitive-content scanning and one-click redaction
 - Store-safe build pipeline, screenshot automation, and Chrome Web Store submission docs
 
-## Local development
+## Frontend development
+
+Prerequisites:
+
+- Node.js with npm
+- Google Chrome for the Playwright smoke tests
+- On Windows PowerShell, use `npm.cmd` if `npm` is blocked by script execution policy
 
 ```bash
 npm install
 npm run build
-npm run build:store
-npm run package:store
-npm run capture:store-assets
-npm run test:phase1
-npm run test:phase2
-npm run test:phase3
-npm run test:phase4
-npm run test:store
 ```
 
-## Backend Development
+Load the extension locally:
+
+1. Open `chrome://extensions`
+2. Enable Developer mode
+3. Click `Load unpacked`
+4. Select the `dist` folder from this project
+5. Open ChatGPT or Gemini and click the Context Kit extension icon
+
+## Backend development
 
 ```bash
 cd backend
 python -m venv .venv
 .venv\Scripts\activate
 pip install -e .
+copy .env.example .env
 uvicorn app.main:app --reload
 ```
 
@@ -61,20 +70,41 @@ Then sign in from the extension using:
 - API Base URL: `http://127.0.0.1:8000`
 - any email address for local-dev login
 
-## Load in Chrome
+Backend docs live in [backend/README.md](backend/README.md).
 
-1. Open `chrome://extensions`
-2. Enable Developer mode
-3. Click `Load unpacked`
-4. Select the `dist` folder from this project
-5. Open ChatGPT or Gemini and click the Context Kit extension icon
+## Store builds
 
-## Store Build
+```bash
+npm run build:store
+npm run package:store
+npm run capture:store-assets
+```
 
-- copy [.env.store.example](D:/Vaishak%20Files/context_bridge/.env.store.example) to `.env.store.local` and replace the placeholder public URLs
-- run `npm run package:store` to create a publish-safe zip in `release/`
-- run `npm run capture:store-assets` to generate listing screenshots in `release/store-assets/`
-- host the static pages in [site](D:/Vaishak%20Files/context_bridge/site) or replace them with your own public site before submission
+Before packaging for a store:
+
+- copy [.env.store.example](.env.store.example) to `.env.store.local` and replace the placeholder public URLs
+- run `npm run test:store` to verify the Chrome Web Store manifest does not include localhost permissions
+- run `npm run test:edge` to verify the Edge Add-ons manifest does not include localhost permissions
+- host the static pages in [site](site) or replace them with your own public site before submission
+
+## Smoke tests
+
+```bash
+npm run test:phase1
+npm run test:phase2
+npm run test:phase3
+npm run test:phase4
+npm run test:store
+npm run test:edge
+```
+
+The phase smoke tests launch a real Chrome instance through Playwright, load the built extension from `dist/`, and interact with live ChatGPT or Gemini pages. Run `npm run build` first. Phase 2 and later also expect the backend virtual environment at `backend/.venv`.
+
+## Known flaws found during local audit
+
+- `npm audit --audit-level=moderate` currently reports 5 vulnerabilities: vulnerable `postcss`, `rollup` through `@crxjs/vite-plugin`, and `esbuild` through Vite. Some fixes may require a breaking Vite/CRX plugin upgrade.
+- `npm run test:phase1` failed locally because the Context Kit service worker did not appear in Chrome within the script timeout. Store and Edge manifest verification still pass.
+- Several docs outside this README still contain old machine-specific `D:/Vaishak Files/context_bridge` links and should be converted to relative links.
 
 ## Current boundaries
 
