@@ -1,0 +1,39 @@
+{
+  "name": "context-kit",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:store": "node ./scripts/build-store.mjs",
+    "build:edge": "npm run build:store",
+    "preview": "vite preview",
+    "package:store": "node ./scripts/package-store-build.mjs",
+    "package:edge": "node ./scripts/package-edge-build.mjs",
+    "capture:store-assets": "node ./scripts/capture-store-assets.mjs",
+    "capture:edge-assets": "node ./scripts/capture-edge-assets.mjs",
+    "test:phase1": "node ./scripts/phase1-smoke-test.mjs",
+    "test:phase2": "node ./scripts/phase2-cloud-smoke-test.mjs",
+    "test:phase3": "node ./scripts/phase3-collab-smoke-test.mjs",
+    "test:phase4": "node ./scripts/phase4-intelligence-smoke-test.mjs",
+    "test:store": "node ./scripts/verify-store-build.mjs",
+    "test:edge": "node ./scripts/verify-edge-build.mjs",
+    "test:edge-local": "node ./scripts/edge-local-smoke-test.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.1.0",
+    "@types/chrome": "^0.0.291",
+    "@types/node": "^22.15.30",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "playwright-core": "^1.54.2",
+    "typescript": "^5.5.4",
+    "vite": "^5.3.5"
+  }
+}

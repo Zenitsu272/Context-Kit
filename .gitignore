@@ -1,0 +1,16 @@
+node_modules/
+dist/
+npm-debug.log*
+.tmp/
+.chrome-test-profile/
+release/
+.env.local
+.env.store.local
+backend/.venv/
+backend/context_kit.db
+context_kit.db
+backend/__pycache__/
+backend/app/__pycache__/
+backend/app/api/__pycache__/
+backend/app/api/routes/__pycache__/
+backend/app/core/__pycache__/
