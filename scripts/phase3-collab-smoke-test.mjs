@@ -18,6 +18,10 @@ async function main() {
     ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(backendPort)],
     {
       cwd: backendDir,
+      env: {
+        ...process.env,
+        DATABASE_URL: "sqlite:///./context_kit.db",
+      },
       stdio: "ignore",
       windowsHide: true,
     },

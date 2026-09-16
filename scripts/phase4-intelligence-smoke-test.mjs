@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { resolveEdgeExecutable, waitForExtensionId } from "./edge-test-utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -14,8 +15,8 @@ async function main() {
   await fs.rm(profileDir, { recursive: true, force: true });
 
   const context = await chromium.launchPersistentContext(profileDir, {
-    executablePath: await resolveChromeExecutable(),
-    headless: false,
+    executablePath: await resolveEdgeExecutable(),
+    headless: true,
     args: [
       `--disable-extensions-except=${distDir}`,
       `--load-extension=${distDir}`,
@@ -88,42 +89,6 @@ async function main() {
   } finally {
     await context.close();
   }
-}
-
-async function waitForExtensionId(context) {
-  const timeoutAt = Date.now() + 20000;
-
-  while (Date.now() < timeoutAt) {
-    for (const worker of context.serviceWorkers()) {
-      const match = worker.url().match(/^chrome-extension:\/\/([a-z]{32})\//);
-      if (match) {
-        return match[1];
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-
-  throw new Error("Context Kit service worker did not appear in Chrome.");
-}
-
-async function resolveChromeExecutable() {
-  const candidates = [
-    process.env.CHROME_PATH,
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    path.join(process.env.LOCALAPPDATA ?? "", "Google", "Chrome", "Application", "chrome.exe"),
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    try {
-      await fs.access(candidate);
-      return candidate;
-    } catch {
-      // Try the next candidate.
-    }
-  }
-
-  throw new Error("Chrome executable not found. Set CHROME_PATH or install Google Chrome.");
 }
 
 main().catch((error) => {

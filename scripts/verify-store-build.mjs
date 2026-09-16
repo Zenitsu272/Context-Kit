@@ -1,14 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { runNpm } from "./command-utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const manifestPath = path.join(repoRoot, "dist", "manifest.json");
 
 async function main() {
-  await runCommand("npm", ["run", "build:store"]);
+  await runNpm(["run", "build:store"], { cwd: repoRoot });
 
   const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const hostPermissions = new Set(manifest.host_permissions ?? []);
@@ -29,25 +29,6 @@ async function main() {
   }
 
   console.log("Store build verification passed.");
-}
-
-function runCommand(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: repoRoot,
-      stdio: "inherit",
-      shell: true,
-    });
-
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(`${command} ${args.join(" ")} failed with exit code ${code ?? "unknown"}.`));
-    });
-    child.on("error", reject);
-  });
 }
 
 main().catch((error) => {

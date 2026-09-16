@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runNpm } from "./command-utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -13,26 +13,7 @@ const env = {
   VITE_PUBLISH_SAFE_BUILD: "true",
 };
 
-await runCommand("npm", ["run", "build"], env);
-
-function runCommand(command, args, envVars) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: "inherit",
-      shell: true,
-      env: envVars,
-    });
-
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(`${command} ${args.join(" ")} failed with exit code ${code ?? "unknown"}.`));
-    });
-    child.on("error", reject);
-  });
-}
+await runNpm(["run", "build"], { env });
 
 async function loadEnvFile(filePath) {
   try {

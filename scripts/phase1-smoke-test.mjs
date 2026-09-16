@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { resolveEdgeExecutable, waitForExtensionId } from "./edge-test-utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -12,15 +12,14 @@ const profileDir = path.join(tmpDir, "phase1-smoke-profile");
 const downloadDir = path.join(tmpDir, "phase1-downloads");
 
 async function main() {
-  const chromePath = await resolveChromeExecutable();
   await ensureBuiltExtension();
   await fs.rm(profileDir, { recursive: true, force: true });
   await fs.rm(downloadDir, { recursive: true, force: true });
   await fs.mkdir(downloadDir, { recursive: true });
 
   const context = await chromium.launchPersistentContext(profileDir, {
-    executablePath: chromePath,
-    headless: false,
+    executablePath: await resolveEdgeExecutable(),
+    headless: true,
     acceptDownloads: true,
     args: [
       `--disable-extensions-except=${distDir}`,
@@ -41,7 +40,7 @@ async function main() {
     });
 
     const unsupportedPage = context.pages()[0] ?? (await context.newPage());
-    await unsupportedPage.goto("https://example.com");
+    await unsupportedPage.goto("about:blank");
     await extPage.reload();
     await extPage.waitForLoadState("domcontentloaded");
     await expectText(extPage, "Manual fallback still works");
@@ -92,26 +91,33 @@ async function testSaveExportDeleteImport(extPage, downloadDir) {
 }
 
 async function testChatgptSelectionAndInsertion(context, extPage) {
-  const page = await context.newPage();
-  await page.goto("https://chatgpt.com/");
-  await page.waitForLoadState("domcontentloaded");
+  const fixtureHtml = `<!doctype html>
+    <html>
+      <head><title>Context Kit ChatGPT Fixture - ChatGPT</title></head>
+      <body>
+        <main>
+          <section id="selectable-chatgpt-text" contenteditable="true" role="textbox">
+            We need a deterministic smoke test.
+          </section>
+          <article data-message-author-role="assistant">Use a fixture page that still matches ChatGPT.</article>
+          <div id="prompt-textarea" contenteditable="true" role="textbox" aria-label="Chat with ChatGPT"></div>
+        </main>
+      </body>
+    </html>`;
 
-  const selectionText = await page.evaluate(() => {
-    const target =
-      document.querySelector("main") ||
-      document.querySelector("h1") ||
-      document.querySelector("[role='textbox']") ||
-      document.body;
-    if (!target) {
-      return "";
-    }
-    const range = document.createRange();
-    range.selectNodeContents(target);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    return selection?.toString().trim() ?? "";
+  await context.route("https://chatgpt.com/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: fixtureHtml,
+    });
   });
+
+  const page = await context.newPage();
+  await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 15000 });
+  await page.locator("#selectable-chatgpt-text").click();
+  await page.keyboard.press("Control+A");
+  const selectionText = await page.evaluate(() => window.getSelection()?.toString().trim() ?? "");
   assert(selectionText.length > 0, "ChatGPT page did not expose selectable text.");
 
   const captureResponse = await sendExtensionMessage(extPage, "chatgpt.com", {
@@ -148,26 +154,33 @@ async function testChatgptSelectionAndInsertion(context, extPage) {
 }
 
 async function testGeminiSelectionAndInsertion(context, extPage) {
-  const page = await context.newPage();
-  await page.goto("https://gemini.google.com/");
-  await page.waitForLoadState("domcontentloaded");
+  const fixtureHtml = `<!doctype html>
+    <html>
+      <head><title>Context Kit Gemini Fixture - Gemini</title></head>
+      <body>
+        <main>
+          <user-query id="selectable-gemini-text" contenteditable="true" role="textbox">
+            Capture this Gemini user prompt.
+          </user-query>
+          <model-response>Use a fixture page that still matches Gemini.</model-response>
+          <div contenteditable="true" role="textbox" aria-label="Enter a prompt for Gemini"></div>
+        </main>
+      </body>
+    </html>`;
 
-  const selectionText = await page.evaluate(() => {
-    const target =
-      document.querySelector("main") ||
-      document.querySelector("h1") ||
-      document.querySelector("[role='textbox']") ||
-      document.body;
-    if (!target) {
-      return "";
-    }
-    const range = document.createRange();
-    range.selectNodeContents(target);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    return selection?.toString().trim() ?? "";
+  await context.route("https://gemini.google.com/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: fixtureHtml,
+    });
   });
+
+  const page = await context.newPage();
+  await page.goto("https://gemini.google.com/", { waitUntil: "domcontentloaded", timeout: 15000 });
+  await page.locator("#selectable-gemini-text").click();
+  await page.keyboard.press("Control+A");
+  const selectionText = await page.evaluate(() => window.getSelection()?.toString().trim() ?? "");
   assert(selectionText.length > 0, "Gemini page did not expose selectable text.");
 
   const captureResponse = await sendExtensionMessage(extPage, "gemini.google.com", {
@@ -237,44 +250,8 @@ async function ensureBuiltExtension() {
   try {
     await fs.access(manifestPath);
   } catch {
-    throw new Error("Build output not found. Run `npm run build` before `npm run test:phase1`.");
+    throw new Error("Build output not found. Run `npm run build:edge` before `npm run test:phase1`.");
   }
-}
-
-async function waitForExtensionId(context) {
-  const timeoutAt = Date.now() + 20000;
-
-  while (Date.now() < timeoutAt) {
-    for (const worker of context.serviceWorkers()) {
-      const match = worker.url().match(/^chrome-extension:\/\/([a-z]{32})\//);
-      if (match) {
-        return match[1];
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-
-  throw new Error("Context Kit service worker did not appear in Chrome.");
-}
-
-async function resolveChromeExecutable() {
-  const candidates = [
-    process.env.CHROME_PATH,
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    path.join(os.homedir(), "AppData", "Local", "Google", "Chrome", "Application", "chrome.exe"),
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    try {
-      await fs.access(candidate);
-      return candidate;
-    } catch {
-      // Try the next path.
-    }
-  }
-
-  throw new Error("Chrome executable not found. Set CHROME_PATH or install Google Chrome.");
 }
 
 function assert(condition, message) {

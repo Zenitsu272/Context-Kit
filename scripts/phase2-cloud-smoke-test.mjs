@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { chromium } from "playwright-core";
+import { runNpm } from "./command-utils.mjs";
+import { resolveEdgeExecutable, waitForExtensionId } from "./edge-test-utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -14,7 +16,14 @@ const backendPython = path.join(backendDir, ".venv", "Scripts", "python.exe");
 const backendPort = 8000;
 
 async function main() {
-  await ensureBuiltExtension();
+  await runNpm(["run", "build"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      VITE_ENABLE_CLOUD_SYNC: "true",
+      VITE_PUBLISH_SAFE_BUILD: "false",
+    },
+  });
   await ensureBackendPython();
   await fs.rm(profileDir, { recursive: true, force: true });
 
@@ -23,6 +32,10 @@ async function main() {
     ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(backendPort)],
     {
       cwd: backendDir,
+      env: {
+        ...process.env,
+        DATABASE_URL: "sqlite:///./context_kit.db",
+      },
       stdio: "ignore",
       windowsHide: true,
     },
@@ -32,8 +45,8 @@ async function main() {
     await waitForHealth(`http://127.0.0.1:${backendPort}/health`);
 
     const context = await chromium.launchPersistentContext(profileDir, {
-      executablePath: await resolveChromeExecutable(),
-      headless: false,
+      executablePath: await resolveEdgeExecutable(),
+      headless: true,
       args: [
         `--disable-extensions-except=${distDir}`,
         `--load-extension=${distDir}`,
@@ -92,10 +105,6 @@ async function main() {
   }
 }
 
-async function ensureBuiltExtension() {
-  await fs.access(path.join(distDir, "manifest.json"));
-}
-
 async function ensureBackendPython() {
   await fs.access(backendPython);
 }
@@ -116,42 +125,6 @@ async function waitForHealth(url) {
   }
 
   throw new Error("Backend health check did not become ready in time.");
-}
-
-async function waitForExtensionId(context) {
-  const timeoutAt = Date.now() + 20000;
-
-  while (Date.now() < timeoutAt) {
-    for (const worker of context.serviceWorkers()) {
-      const match = worker.url().match(/^chrome-extension:\/\/([a-z]{32})\//);
-      if (match) {
-        return match[1];
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-
-  throw new Error("Context Kit service worker did not appear in Chrome.");
-}
-
-async function resolveChromeExecutable() {
-  const candidates = [
-    process.env.CHROME_PATH,
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    path.join(process.env.LOCALAPPDATA ?? "", "Google", "Chrome", "Application", "chrome.exe"),
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    try {
-      await fs.access(candidate);
-      return candidate;
-    } catch {
-      // Try the next candidate.
-    }
-  }
-
-  throw new Error("Chrome executable not found. Set CHROME_PATH or install Google Chrome.");
 }
 
 main().catch((error) => {
