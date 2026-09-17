@@ -43,7 +43,9 @@ async function main() {
     await unsupportedPage.goto("about:blank");
     await extPage.reload();
     await extPage.waitForLoadState("domcontentloaded");
+    await expectText(extPage, "Manual capture available");
     await expectText(extPage, "Manual fallback still works");
+    await expectTextAbsent(extPage, "Receiving end does not exist");
 
     await testDraftRecovery(extPage);
     const exportedFile = await testSaveExportDeleteImport(extPage, downloadDir);
@@ -233,6 +235,11 @@ async function sendExtensionMessage(extPage, urlFragment, message) {
 async function expectText(page, text) {
   const locator = page.getByText(text, { exact: true });
   await locator.waitFor({ state: "visible", timeout: 15000 });
+}
+
+async function expectTextAbsent(page, text) {
+  const content = await page.evaluate(() => document.body.innerText);
+  assert(!content.includes(text), `Unexpected text was visible: ${text}`);
 }
 
 async function expectInputValue(page, selector, expected) {

@@ -10,9 +10,14 @@ export async function getActiveTabId(): Promise<number | null> {
   return tab?.id ?? null;
 }
 
+async function getActiveTab(): Promise<chrome.tabs.Tab | null> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab ?? null;
+}
+
 export async function getCurrentPageStatus(): Promise<PageStatus> {
-  const tabId = await getActiveTabId();
-  if (!tabId) {
+  const tab = await getActiveTab();
+  if (!tab?.id) {
     return {
       isSupported: false,
       platform: "unsupported",
@@ -22,7 +27,11 @@ export async function getCurrentPageStatus(): Promise<PageStatus> {
     };
   }
 
-  return sendToActiveTab<PageStatus>(tabId, { type: "GET_PAGE_STATUS" });
+  try {
+    return await sendToActiveTab<PageStatus>(tab.id, { type: "GET_PAGE_STATUS" });
+  } catch (error) {
+    return buildUnavailablePageStatus(tab, error);
+  }
 }
 
 export async function extractConversation(): Promise<ExtractedConversation> {
@@ -42,14 +51,32 @@ export async function extractSelectedText(): Promise<{
   url: string;
   text: string;
 }> {
-  const tabId = await getActiveTabId();
-  if (!tabId) {
+  const tab = await getActiveTab();
+  if (!tab?.id) {
     throw new Error("No active tab found.");
   }
 
-  return sendToActiveTab(tabId, {
-    type: "EXTRACT_SELECTION",
-  });
+  try {
+    return await sendToActiveTab(tab.id, {
+      type: "EXTRACT_SELECTION",
+    });
+  } catch (error) {
+    if (!isContentScriptUnavailable(error)) {
+      throw error;
+    }
+
+    const text = await readSelectedTextFromTab(tab.id);
+    if (!text) {
+      throw new Error("No selected text was found on the current page.");
+    }
+
+    return {
+      platform: detectPlatformFromUrl(tab.url) ?? "manual",
+      title: tab.title?.trim() || "Selected Text",
+      url: tab.url ?? "",
+      text,
+    };
+  }
 }
 
 export async function insertRenderedContext(text: string) {
@@ -75,10 +102,79 @@ async function sendToActiveTab<T>(tabId: number, message: ContentScriptRequest):
     }
     return response as T;
   } catch (error) {
+    if (isContentScriptUnavailable(error)) {
+      throw new Error("Context Kit is not connected to this tab yet.");
+    }
+
     throw new Error(
       error instanceof Error
         ? error.message
         : "The page did not respond. Open ChatGPT or Gemini and try again.",
     );
   }
+}
+
+async function readSelectedTextFromTab(tabId: number): Promise<string> {
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => window.getSelection()?.toString().trim() ?? "",
+    });
+    return typeof result?.result === "string" ? result.result : "";
+  } catch {
+    return "";
+  }
+}
+
+function buildUnavailablePageStatus(tab: chrome.tabs.Tab, error: unknown): PageStatus {
+  const platform = detectPlatformFromUrl(tab.url);
+  if (platform) {
+    return {
+      isSupported: false,
+      platform: "unsupported",
+      title: tab.title?.trim() || "Supported page needs refresh",
+      url: tab.url ?? "",
+      reason: "This supported tab is still loading or Context Kit has not connected yet. Refresh the page and try again.",
+    };
+  }
+
+  return {
+    isSupported: false,
+    platform: "unsupported",
+    title: "Manual capture available",
+    url: tab.url ?? "",
+    reason: isContentScriptUnavailable(error)
+      ? "Open ChatGPT or Gemini for full extraction, or use Manual Context / Capture Selected Text on this page."
+      : "Open ChatGPT or Gemini for full extraction, or use Manual Context as a fallback.",
+  };
+}
+
+function detectPlatformFromUrl(url?: string): Exclude<SupportedPlatform, "manual" | "unsupported"> | null {
+  if (!url) {
+    return null;
+  }
+
+  try {
+    const hostname = new URL(url).hostname;
+    if (hostname.includes("chatgpt.com") || hostname.includes("chat.openai.com")) {
+      return "chatgpt";
+    }
+    if (hostname.includes("gemini.google.com") || hostname.includes("aistudio.google.com")) {
+      return "gemini";
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function isContentScriptUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("Context Kit is not connected") ||
+    message.includes("Could not establish connection") ||
+    message.includes("Receiving end does not exist") ||
+    message.includes("No response from content script")
+  );
 }
