@@ -12,14 +12,23 @@ import { redactSensitiveContent, scanSensitiveContent } from "./safety";
 export function createDraftFromConversation(
   conversation: ExtractedConversation,
 ): ContextDraft {
-  const transcript = conversation.messages.map((message) => message.content).join("\n");
+  const transcript = conversation.messages
+    .map((message) => message.content)
+    .join("\n");
   const title =
     conversation.title.trim() ||
-    truncate(findFirstMessage(conversation.messages) || "Untitled Context Package", 72);
-  const derived = deriveDraftInsights({ title, messages: conversation.messages });
+    truncate(
+      findFirstMessage(conversation.messages) || "Untitled Context Package",
+      72,
+    );
+  const derived = deriveDraftInsights({
+    title,
+    messages: conversation.messages,
+  });
 
   return {
     title,
+    assets: conversation.assets ?? [],
     platform: conversation.platform,
     sourceUrl: conversation.url,
     summary: derived.summary,
@@ -77,8 +86,12 @@ export function createDraftFromSelection(input: {
     messages,
     warnings:
       messages.length > 1
-        ? ["Review the captured text before saving to make sure the message boundaries look right."]
-        : ["Only a small amount of selected text was captured. Consider expanding the selection."],
+        ? [
+            "Review the captured text before saving to make sure the message boundaries look right.",
+          ]
+        : [
+            "Only a small amount of selected text was captured. Consider expanding the selection.",
+          ],
   };
 
   return createDraftFromConversation(conversation);
@@ -88,7 +101,13 @@ export function materializePackage(
   draft: ContextDraft,
   existingPackage?: Pick<
     ContextPackage,
-    "id" | "capturedAt" | "workspaceId" | "visibility" | "createdBy" | "currentVersion" | "versionCount"
+    | "id"
+    | "capturedAt"
+    | "workspaceId"
+    | "visibility"
+    | "createdBy"
+    | "currentVersion"
+    | "versionCount"
   >,
 ): ContextPackage {
   const now = new Date().toISOString();
@@ -101,6 +120,7 @@ export function materializePackage(
     currentVersion: existingPackage?.currentVersion ?? 1,
     versionCount: existingPackage?.versionCount ?? 1,
     title: draft.title.trim() || "Untitled Context Package",
+    assets: draft.assets ?? [],
     platform: draft.platform,
     sourceUrl: draft.sourceUrl.trim(),
     capturedAt: existingPackage?.capturedAt ?? now,
@@ -120,11 +140,24 @@ export function materializePackage(
 }
 
 export function rescanDraft(draft: ContextDraft): ContextDraft {
-  const transcript = draft.messages.map((message) => message.content).join("\n");
+  const transcript = draft.messages
+    .map((message) => message.content)
+    .join("\n");
   return {
     ...draft,
     sensitiveFindings: scanSensitiveContent(
-      [draft.title, draft.summary, draft.notes, transcript].filter(Boolean).join("\n"),
+      [
+        draft.title,
+        draft.summary,
+        draft.notes,
+        ...draft.keyDecisions,
+        ...draft.constraints,
+        ...draft.openQuestions,
+        transcript,
+        ...(draft.assets ?? []).map((asset) => asset.text ?? ""),
+      ]
+        .filter(Boolean)
+        .join("\n"),
     ),
     reviewWarnings: cleanList(draft.reviewWarnings),
   };
@@ -145,6 +178,10 @@ export function redactDraftSensitiveContent(draft: ContextDraft): ContextDraft {
     openQuestions: draft.openQuestions.map(redactSensitiveContent),
     notes: redactSensitiveContent(draft.notes),
     messages: nextMessages,
+    assets: draft.assets?.map((asset) => ({
+      ...asset,
+      text: asset.text ? redactSensitiveContent(asset.text) : undefined,
+    })),
   });
 }
 
@@ -168,33 +205,43 @@ export function serializeMessages(messages: ExtractedMessage[]): string {
 }
 
 export function parseTranscript(text: string): ExtractedMessage[] {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
 
   const messages: ExtractedMessage[] = [];
   let currentRole: MessageRole = "user";
   let buffer: string[] = [];
 
   function flush() {
-    const content = normalizeText(buffer.join(" "));
+    const content = buffer.join("\n").trim();
     if (!content) {
       buffer = [];
       return;
     }
 
-    messages.push(buildManualMessage(currentRole, content, messages.length + 1));
+    messages.push(
+      buildManualMessage(currentRole, content, messages.length + 1),
+    );
     buffer = [];
   }
 
+  let codeFence: string | null = null;
   for (const line of lines) {
-    const match = line.match(/^(user|assistant|system)\s*:\s*(.*)$/i);
+    const match: RegExpMatchArray | null = codeFence
+      ? null
+      : line.match(/^(user|assistant|system)\s*:\s*(.*)$/i);
     if (match) {
       flush();
       currentRole = match[1].toLowerCase() as MessageRole;
       buffer.push(match[2]);
+      codeFence = match[2].match(/^\s*(`{3,}|~{3,})/)?.[1] ?? null;
       continue;
+    }
+
+    const fence = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
+    if (fence) {
+      if (!codeFence) codeFence = fence;
+      else if (fence[0] === codeFence[0] && fence.length >= codeFence.length)
+        codeFence = null;
     }
 
     if (!buffer.length && messages.length === 0) {
@@ -216,14 +263,20 @@ export function parseTranscript(text: string): ExtractedMessage[] {
 
 function buildReviewWarnings(conversation: ExtractedConversation): string[] {
   const warnings = [...(conversation.warnings ?? [])];
-  const uniqueRoles = new Set(conversation.messages.map((message) => message.role));
+  const uniqueRoles = new Set(
+    conversation.messages.map((message) => message.role),
+  );
 
   if (conversation.confidence === "low") {
-    warnings.push("Extraction confidence is low. Review the transcript carefully before saving.");
+    warnings.push(
+      "Extraction confidence is low. Review the transcript carefully before saving.",
+    );
   }
 
   if (conversation.messages.length < 2) {
-    warnings.push("Only a small number of messages were detected. Manual cleanup may be needed.");
+    warnings.push(
+      "Only a small number of messages were detected. Manual cleanup may be needed.",
+    );
   }
 
   if (!uniqueRoles.has("user") || !uniqueRoles.has("assistant")) {
@@ -231,7 +284,9 @@ function buildReviewWarnings(conversation: ExtractedConversation): string[] {
   }
 
   if (conversation.messages.some((message) => message.content.length < 10)) {
-    warnings.push("Some extracted messages are very short and may reflect partial capture.");
+    warnings.push(
+      "Some extracted messages are very short and may reflect partial capture.",
+    );
   }
 
   return dedupe(warnings);
@@ -259,11 +314,15 @@ function cleanList(items: string[]): string[] {
 }
 
 function findFirstMessage(messages: ExtractedMessage[]): string | undefined {
-  return messages.find((message) => message.role === "user" || message.role === "assistant")?.content;
+  return messages.find(
+    (message) => message.role === "user" || message.role === "assistant",
+  )?.content;
 }
 
 function truncate(value: string, length: number): string {
-  return value.length > length ? `${value.slice(0, length - 3).trim()}...` : value;
+  return value.length > length
+    ? `${value.slice(0, length - 3).trim()}...`
+    : value;
 }
 
 function dedupe(items: string[]): string[] {

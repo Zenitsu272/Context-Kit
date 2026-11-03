@@ -1,4 +1,7 @@
-import type { ContentScriptRequest, PageStatus } from "../types/context-package";
+import type {
+  ContentScriptRequest,
+  PageStatus,
+} from "../types/context-package";
 import { chatgptAdapter } from "./adapters/chatgpt.adapter";
 import { geminiAdapter } from "./adapters/gemini.adapter";
 
@@ -14,18 +17,33 @@ function getUnsupportedStatus(): PageStatus {
     platform: "unsupported",
     title: document.title,
     url: window.location.href,
-    reason: "This site is not supported yet. Use Manual Context to save notes anyway.",
+    reason:
+      "This site is not supported yet. Use Manual Context to save notes anyway.",
   };
 }
 
-chrome.runtime.onMessage.addListener((message: ContentScriptRequest, _sender, sendResponse) => {
+type MessageListener = Parameters<
+  typeof chrome.runtime.onMessage.addListener
+>[0];
+const scope = globalThis as typeof globalThis & {
+  contextKitListener?: MessageListener;
+};
+if (scope.contextKitListener)
+  chrome.runtime.onMessage.removeListener(scope.contextKitListener);
+const listener: MessageListener = (
+  message: ContentScriptRequest,
+  _sender,
+  sendResponse,
+) => {
   const activeAdapter = getActiveAdapter();
 
   (async () => {
     try {
       switch (message.type) {
         case "GET_PAGE_STATUS":
-          sendResponse(activeAdapter?.getPageStatus() ?? getUnsupportedStatus());
+          sendResponse(
+            activeAdapter?.getPageStatus() ?? getUnsupportedStatus(),
+          );
           return;
         case "EXTRACT_CONVERSATION":
           if (!activeAdapter) {
@@ -58,10 +76,15 @@ chrome.runtime.onMessage.addListener((message: ContentScriptRequest, _sender, se
       }
     } catch (error) {
       sendResponse({
-        error: error instanceof Error ? error.message : "Unknown content script error",
+        error:
+          error instanceof Error
+            ? error.message
+            : "Unknown content script error",
       });
     }
   })();
 
   return true;
-});
+};
+scope.contextKitListener = listener;
+chrome.runtime.onMessage.addListener(listener);

@@ -44,7 +44,6 @@ async function main() {
     await extPage.reload();
     await extPage.waitForLoadState("domcontentloaded");
     await expectText(extPage, "Manual capture available");
-    await expectText(extPage, "Manual fallback still works");
     await expectTextAbsent(extPage, "Receiving end does not exist");
 
     await testDraftRecovery(extPage);
@@ -61,7 +60,7 @@ async function main() {
 
 async function testDraftRecovery(extPage) {
   await extPage.getByText("Create Manual Context", { exact: true }).click();
-  await extPage.locator("input").fill("Smoke Draft");
+  await extPage.getByLabel("Title", { exact: true }).fill("Smoke Draft");
   await extPage.locator("textarea").first().fill("Draft recovery should persist across reload.");
   await extPage.waitForTimeout(800);
   await extPage.reload();
@@ -83,6 +82,7 @@ async function testSaveExportDeleteImport(extPage, downloadDir) {
   await download.saveAs(downloadPath);
 
   await extPage.getByText("Delete", { exact: true }).click();
+  await extPage.getByText("Confirm delete", { exact: true }).click();
   await expectText(extPage, "No Context Packages yet.");
 
   await extPage.locator("input[type='file']").setInputFiles(downloadPath);

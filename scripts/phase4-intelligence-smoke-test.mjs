@@ -72,10 +72,10 @@ async function main() {
       throw error;
     }
 
-    await extPage.locator("select").nth(1).selectOption("debug");
+    await extPage.getByLabel("Prompt Template", { exact: true }).selectOption("debug");
     await extPage.locator("input[placeholder*='Focus on']").fill("auth middleware tests");
 
-    const previewText = await extPage.locator("pre").innerText();
+    const previewText = await extPage.getByLabel("Context preview", { exact: true }).inputValue();
     if (!previewText.includes("Focus task: auth middleware tests") || !previewText.includes("Diagnose the likely cause")) {
       throw new Error("Smart insertion preview did not reflect template and focus settings.");
     }

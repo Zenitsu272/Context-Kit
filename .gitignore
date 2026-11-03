@@ -6,6 +6,9 @@ npm-debug.log*
 release/
 .env.local
 .env.store.local
+.env
+.env.*.local
+backend/.env
 backend/.venv/
 backend/context_kit.db
 context_kit.db

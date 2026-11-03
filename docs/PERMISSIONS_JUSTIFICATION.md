@@ -1,12 +1,22 @@
 # Context Kit Permission Justification
 
-## Chrome permissions used
+## Edge extension permissions used
 
 ### `storage`
 
 - stores local Context Packages
 - stores draft recovery state
 - stores local-dev auth session and selected workspace state
+- stores optional Gemini credentials, model and cooldowns, restricted to trusted extension contexts
+
+### `clipboardWrite`
+
+- copies the user-selected handoff to paste into another AI tool
+
+### `scripting` and `activeTab`
+
+- reconnects a supported tab after an extension reload
+- reads selected text on a user-invoked ordinary webpage
 
 ### `sidePanel`
 
@@ -31,7 +41,10 @@
 
 ## Current minimization choices
 
-- host permissions are limited to the supported AI properties and local development origins
+- Required host permissions are limited to supported AI properties (and localhost only in development builds).
+- Optional HTTPS host permission is declared for attachments on different CDNs. Access is requested for one specific origin after the user clicks **Import file**, never for all sites at once. No extra content scripts run on those hosts.
+- Enabling Gemini requests only `https://generativelanguage.googleapis.com/*`. Requests use the API key header; keys are not put into URLs.
+- PDF workers and parsing code are packaged with the extension; no remote JavaScript is executed.
 - unsupported pages do not receive conversation extraction behavior
 - insertion happens only on explicit user action
 - sensitive-content scanning runs locally inside the extension workflow

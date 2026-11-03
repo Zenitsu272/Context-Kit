@@ -1,5 +1,11 @@
 # Publishing Status
 
+## Version 0.2
+
+Includes optional multi-key Gemini, local PDF extraction, AI image/scan/short-video reading, original-file backups, per-link imports and the redesigned sidebar. Production cloud sync remains disabled. The Edge archive is generated at `release/context-kit-edge-addons-0.2.0.zip`; local installation uses `dist/`.
+
+Pushing source or distributing a GitHub release does not activate an Edge Add-ons listing. Reload the existing unpacked extension for local use. Public store publication still requires the external steps below.
+
 ## Ready inside the repo
 
 - store-safe build command for Chromium-based store releases

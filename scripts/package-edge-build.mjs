@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { runNpm, runCommand } from "./command-utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -14,36 +14,17 @@ async function main() {
   const zipName = `context-kit-edge-addons-${packageJson.version}.zip`;
   const zipPath = path.join(releaseDir, zipName);
 
-  await runCommand("npm", ["run", "build:edge"]);
+  await runNpm(["run", "build:edge"], { cwd: repoRoot });
   await fs.mkdir(releaseDir, { recursive: true });
   await fs.rm(zipPath, { force: true });
 
   await runCommand("powershell", [
     "-NoProfile",
     "-Command",
-    `Compress-Archive -Path '${distDir}\\*' -DestinationPath '${zipPath}' -Force`,
-  ]);
+    `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory('${distDir.replace(/'/g, "''")}', '${zipPath.replace(/'/g, "''")}')`,
+  ], { cwd: repoRoot });
 
   console.log(`Packaged Edge Add-ons build: ${zipPath}`);
-}
-
-function runCommand(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: repoRoot,
-      stdio: "inherit",
-      shell: true,
-    });
-
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(`${command} ${args.join(" ")} failed with exit code ${code ?? "unknown"}.`));
-    });
-    child.on("error", reject);
-  });
 }
 
 main().catch((error) => {

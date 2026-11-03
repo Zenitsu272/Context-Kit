@@ -1,0 +1,27 @@
+name: Edge extension checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  local-extension:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:core
+      - run: npm run test:edge
+      - run: npm run test:phase1
+      - run: npm run test:phase4
+      - run: npm run test:quality
+      - run: npm audit --audit-level=moderate

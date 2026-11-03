@@ -71,6 +71,7 @@ async function main() {
       const email = `phase2-${unique}@example.com`;
       const title = `Cloud UI Smoke ${unique}`;
 
+      await extPage.getByRole("button", { name: "Settings", exact: true }).click();
       await extPage.getByLabel("API Base URL", { exact: true }).fill(`http://127.0.0.1:${backendPort}`);
       await extPage.getByLabel("Email", { exact: true }).fill(email);
       await extPage.getByLabel("Name", { exact: true }).fill("Phase Two Smoke");
@@ -87,8 +88,9 @@ async function main() {
         throw error;
       }
 
+      await extPage.getByRole("button", { name: /^Library/ }).click();
       await extPage.getByText("Create Manual Context", { exact: true }).click();
-      await extPage.locator("input").fill(title);
+      await extPage.getByLabel("Title", { exact: true }).fill(title);
       await extPage.locator("textarea").first().fill("Saved through the Context Kit cloud flow.");
       await extPage.getByText("Save Context Package", { exact: true }).click();
       await extPage.getByText(title, { exact: true }).waitFor({ state: "visible", timeout: 15000 });

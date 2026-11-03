@@ -18,12 +18,14 @@ if (enableCloudSync) {
 export default defineManifest({
   manifest_version: 3,
   name: "Context Kit",
-  version: "0.1.0",
+  version: "0.2.0",
   description:
     "Save AI conversations as reusable context packages and insert them into supported tools.",
   minimum_chrome_version: "114",
-  permissions: ["storage", "sidePanel", "scripting", "activeTab", "tabs"],
+  permissions: ["storage", "sidePanel", "scripting", "activeTab", "tabs", "clipboardWrite"],
   host_permissions: hostPermissions,
+  // Requested one origin at a time, only for Gemini or a user-selected attachment.
+  optional_host_permissions: ["https://*/*"],
   background: {
     service_worker: "src/background/service-worker.ts",
     type: "module",

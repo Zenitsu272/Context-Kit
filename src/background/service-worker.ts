@@ -1,4 +1,5 @@
 async function configureSidePanel() {
+  await chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
   if (!chrome.sidePanel?.setPanelBehavior) {
     return;
   }
@@ -17,3 +18,5 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   void configureSidePanel();
 });
+
+void configureSidePanel();

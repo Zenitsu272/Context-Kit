@@ -7,12 +7,22 @@ interface PackageListProps {
   workspaceNameById?: Record<string, string>;
 }
 
-export function PackageList({ packages, onSelect, workspaceNameById = {} }: PackageListProps) {
+export function PackageList({
+  packages,
+  onSelect,
+  workspaceNameById = {},
+}: PackageListProps) {
   if (!packages.length) {
     return (
       <div className="empty-state">
+        <span className="empty-mark" aria-hidden="true">
+          ↳
+        </span>
         <p>No Context Packages yet.</p>
-        <span>Save a conversation or create one manually to get started.</span>
+        <span>
+          Your next conversation doesn’t have to start from scratch. Save one
+          above, or add notes and files manually.
+        </span>
       </div>
     );
   }
@@ -37,9 +47,20 @@ export function PackageList({ packages, onSelect, workspaceNameById = {} }: Pack
           <strong>{contextPackage.title}</strong>
           <p>{contextPackage.summary || "No summary saved yet."}</p>
           <div className="tag-row">
-            {contextPackage.workspaceId && workspaceNameById[contextPackage.workspaceId] && (
-              <span className="tag-chip tag-chip--workspace">{workspaceNameById[contextPackage.workspaceId]}</span>
+            <span className="tag-chip">
+              {contextPackage.messages.length} messages
+            </span>
+            {!!contextPackage.assets?.length && (
+              <span className="tag-chip">
+                {contextPackage.assets.length} files
+              </span>
             )}
+            {contextPackage.workspaceId &&
+              workspaceNameById[contextPackage.workspaceId] && (
+                <span className="tag-chip tag-chip--workspace">
+                  {workspaceNameById[contextPackage.workspaceId]}
+                </span>
+              )}
             {contextPackage.currentVersion ? (
               <span className="tag-chip">v{contextPackage.currentVersion}</span>
             ) : null}

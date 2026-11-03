@@ -1,4 +1,7 @@
-import type { ExtractedConversation, PageStatus } from "../../types/context-package";
+import type {
+  ExtractedConversation,
+  PageStatus,
+} from "../../types/context-package";
 import type { PlatformAdapter } from "./types";
 import {
   buildMessage,
@@ -6,6 +9,7 @@ import {
   dedupeMessages,
   setEditableValue,
   sortByDocumentOrder,
+  collectAssetReferences,
 } from "./shared";
 
 const CHATGPT_PROMPT_SELECTOR = [
@@ -20,8 +24,8 @@ export const chatgptAdapter: PlatformAdapter = {
 
   detect() {
     return (
-      window.location.hostname.includes("chatgpt.com") ||
-      window.location.hostname.includes("chat.openai.com")
+      window.location.hostname === "chatgpt.com" ||
+      window.location.hostname === "chat.openai.com"
     );
   },
 
@@ -29,27 +33,35 @@ export const chatgptAdapter: PlatformAdapter = {
     return {
       isSupported: true,
       platform: "chatgpt",
-      title: cleanText(document.title.replace(/\s*-\s*ChatGPT\s*$/i, "")) || "ChatGPT conversation",
+      title:
+        cleanText(document.title.replace(/\s*-\s*ChatGPT\s*$/i, "")) ||
+        "ChatGPT conversation",
       url: window.location.href,
     };
   },
 
   extractConversation(): ExtractedConversation {
-    const primaryNodes = [...document.querySelectorAll<HTMLElement>("[data-message-author-role]")];
-    const fallbackNodes = sortByDocumentOrder(
-      [
-        ...[...document.querySelectorAll<HTMLElement>("[data-testid*='user-message']")].map(
-          (element) => ({ element, role: "user" as const }),
+    const primaryNodes = [
+      ...document.querySelectorAll<HTMLElement>("[data-message-author-role]"),
+    ];
+    const fallbackNodes = sortByDocumentOrder([
+      ...[
+        ...document.querySelectorAll<HTMLElement>(
+          "[data-testid*='user-message']",
         ),
-        ...[...document.querySelectorAll<HTMLElement>("[data-testid*='assistant-message']")].map(
-          (element) => ({ element, role: "assistant" as const }),
+      ].map((element) => ({ element, role: "user" as const })),
+      ...[
+        ...document.querySelectorAll<HTMLElement>(
+          "[data-testid*='assistant-message']",
         ),
-        ...[...document.querySelectorAll<HTMLElement>("main article")].map((element, index) => ({
+      ].map((element) => ({ element, role: "assistant" as const })),
+      ...[...document.querySelectorAll<HTMLElement>("main article")].map(
+        (element, index) => ({
           element,
-          role: index % 2 === 0 ? ("assistant" as const) : ("user" as const),
-        })),
-      ],
-    );
+          role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        }),
+      ),
+    ]);
 
     const messages = dedupeMessages(
       (primaryNodes.length
@@ -58,13 +70,25 @@ export const chatgptAdapter: PlatformAdapter = {
               element.getAttribute("data-message-author-role") === "user"
                 ? "user"
                 : "assistant";
-            const content = cleanText(element.innerText);
+            const content = element.innerText.trim();
             return content ? buildMessage(role, content, index + 1) : null;
           })
-        : fallbackNodes.map(({ element, role }, index) => {
-            const content = cleanText(element.innerText);
-            return content ? buildMessage(role, content, index + 1) : null;
-          })
+        : fallbackNodes
+            .filter(
+              (item, index, all) =>
+                !all.some(
+                  (other, otherIndex) =>
+                    otherIndex !== index &&
+                    other.element !== item.element &&
+                    item.element.contains(other.element),
+                ) &&
+                all.findIndex((other) => other.element === item.element) ===
+                  index,
+            )
+            .map(({ element, role }, index) => {
+              const content = element.innerText.trim();
+              return content ? buildMessage(role, content, index + 1) : null;
+            })
       ).filter((item): item is NonNullable<typeof item> => Boolean(item)),
     );
 
@@ -73,7 +97,9 @@ export const chatgptAdapter: PlatformAdapter = {
       warnings.push("ChatGPT used fallback extraction selectors on this page.");
     }
     if (!messages.length) {
-      warnings.push("No conversation messages were reliably detected from this ChatGPT page.");
+      warnings.push(
+        "No conversation messages were reliably detected from this ChatGPT page.",
+      );
     }
 
     return {
@@ -81,16 +107,26 @@ export const chatgptAdapter: PlatformAdapter = {
       title: this.getPageStatus().title,
       url: window.location.href,
       extractedAt: new Date().toISOString(),
-      confidence: messages.length >= 4 ? "high" : messages.length >= 2 ? "medium" : "low",
+      confidence:
+        messages.length >= 4 ? "high" : messages.length >= 2 ? "medium" : "low",
       messages,
+      assets: collectAssetReferences(
+        primaryNodes.length
+          ? primaryNodes
+          : fallbackNodes.map((item) => item.element),
+      ),
       warnings,
     };
   },
 
   async insertIntoPrompt(text: string) {
-    const promptCandidates = [...document.querySelectorAll<HTMLElement>(CHATGPT_PROMPT_SELECTOR)];
+    const promptCandidates = [
+      ...document.querySelectorAll<HTMLElement>(CHATGPT_PROMPT_SELECTOR),
+    ];
     const element = promptCandidates.find(
-      (candidate) => candidate.offsetParent !== null || candidate.getAttribute("role") === "textbox",
+      (candidate) =>
+        candidate.offsetParent !== null ||
+        candidate.getAttribute("role") === "textbox",
     );
     if (!element) {
       throw new Error("ChatGPT prompt box not found.");

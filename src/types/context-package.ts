@@ -4,7 +4,24 @@ export type MessageRole = "user" | "assistant" | "system";
 
 export type ContextDepth = "brief" | "detailed" | "full";
 
-export type PromptTemplate = "general" | "implementation" | "debug" | "handoff" | "planning";
+export type PromptTemplate =
+  | "general"
+  | "implementation"
+  | "debug"
+  | "handoff"
+  | "planning";
+
+export interface ContextAsset {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  source: "local" | "reference";
+  sourceUrl?: string;
+  text?: string;
+  extraction?: "local" | "gemini";
+  warning?: string;
+}
 
 export interface ExtractedMessage {
   id: string;
@@ -21,6 +38,7 @@ export interface ExtractedConversation {
   confidence: "high" | "medium" | "low";
   messages: ExtractedMessage[];
   warnings?: string[];
+  assets?: ContextAsset[];
 }
 
 export interface SensitiveFinding {
@@ -30,6 +48,7 @@ export interface SensitiveFinding {
 }
 
 export interface ContextPackage {
+  assets?: ContextAsset[];
   id: string;
   workspaceId?: string | null;
   visibility?: "private" | "team" | "selected";
@@ -55,6 +74,8 @@ export interface ContextPackage {
 }
 
 export interface ContextDraft {
+  editingPackageId?: string;
+  assets?: ContextAsset[];
   title: string;
   platform: SupportedPlatform;
   sourceUrl: string;

@@ -12,6 +12,16 @@ async function main() {
 
   const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const hostPermissions = new Set(manifest.host_permissions ?? []);
+  const packageJson = JSON.parse(await fs.readFile(path.join(repoRoot, "package.json"), "utf8"));
+  if (manifest.version !== packageJson.version) throw new Error("Manifest/package versions differ.");
+  if (hostPermissions.has("<all_urls>") || hostPermissions.has("https://*/*")) throw new Error("Broad HTTPS access must remain optional.");
+  if (!(manifest.optional_host_permissions ?? []).includes("https://*/*")) throw new Error("Missing optional per-origin attachment/API permission.");
+  for (const resource of ["pdf-resources/cmaps/Adobe-Japan1-UCS2.bcmap", "pdf-resources/standard_fonts/LiberationSans-Regular.ttf"]) await fs.access(path.join(repoRoot, "dist", resource));
+  for (const file of await fs.readdir(path.join(repoRoot, "dist", "assets"))) {
+    if (!file.endsWith(".js")) continue;
+    const content = await fs.readFile(path.join(repoRoot, "dist", "assets", file), "utf8");
+    if (/AIza[A-Za-z0-9_-]{30,}/.test(content)) throw new Error("A Google API key-like value was found in the shared build.");
+  }
 
   const forbidden = ["http://127.0.0.1/*", "http://localhost/*"].filter((item) => hostPermissions.has(item));
   if (forbidden.length) {

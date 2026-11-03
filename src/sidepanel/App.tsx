@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { GeminiSettings } from "./GeminiSettings";
+import { exportBackup, readBackup } from "../storage/backup";
+import { downloadBlob } from "../storage/assets";
 import { CreatePackage } from "./CreatePackage";
 import { PackageDetail } from "./PackageDetail";
 import { PackageList } from "./PackageList";
@@ -23,8 +26,17 @@ import {
   savePackage,
 } from "../storage/local-cache";
 import type { AuthSession } from "../types/auth";
-import type { ContextDraft, ContextPackage, PageStatus, RenderOptions } from "../types/context-package";
-import type { PackageVersion, Workspace, WorkspaceMember } from "../types/workspace";
+import type {
+  ContextDraft,
+  ContextPackage,
+  PageStatus,
+  RenderOptions,
+} from "../types/context-package";
+import type {
+  PackageVersion,
+  Workspace,
+  WorkspaceMember,
+} from "../types/workspace";
 import { appConfig } from "../config";
 import {
   extractConversation,
@@ -59,6 +71,9 @@ type ViewState =
 type StatusTone = "neutral" | "success" | "warning" | "error";
 
 export function App() {
+  const [activeSection, setActiveSection] = useState<"library" | "settings">(
+    "library",
+  );
   const [packages, setPackages] = useState<ContextPackage[]>([]);
   const [savedDraft, setSavedDraft] = useState<ContextDraft | null>(null);
   const [pageStatus, setPageStatus] = useState<PageStatus>({
@@ -69,15 +84,15 @@ export function App() {
   });
   const [view, setView] = useState<ViewState>({ name: "home" });
   const [query, setQuery] = useState("");
-  const [platformFilter, setPlatformFilter] = useState<"all" | "chatgpt" | "gemini" | "manual">("all");
+  const [platformFilter, setPlatformFilter] = useState<
+    "all" | "chatgpt" | "gemini" | "manual"
+  >("all");
   const [tagFilter, setTagFilter] = useState("");
   const [recentDays, setRecentDays] = useState<"" | "7" | "30" | "90">("");
   const [isWorking, setIsWorking] = useState(false);
   const [status, setStatus] = useState<{ tone: StatusTone; text: string }>({
     tone: "neutral",
-    text: appConfig.enableCloudSync
-      ? "Local MVP mode. Sign in below to start using cloud sync."
-      : "Local-first publishing build. Cloud sync is disabled in this package.",
+    text: "",
   });
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [isAuthWorking, setIsAuthWorking] = useState(false);
@@ -87,14 +102,32 @@ export function App() {
     name: "",
   });
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
-  const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(
+    null,
+  );
+  const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>(
+    [],
+  );
   const [workspaceNameDraft, setWorkspaceNameDraft] = useState("");
   const [packageVersions, setPackageVersions] = useState<PackageVersion[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const persistDraft = useCallback((draft: ContextDraft) => {
+    setSavedDraft(draft);
+    void saveActiveDraft(draft).catch(() =>
+      setStatus({
+        tone: "error",
+        text: "Draft could not be saved. Storage may be full; export a backup before freeing space.",
+      }),
+    );
+  }, []);
 
   useEffect(() => {
-    void bootstrap();
+    void bootstrap().catch(() =>
+      setStatus({
+        tone: "error",
+        text: "Could not load local data. Reopen the sidebar and try again.",
+      }),
+    );
 
     const handleActivated = () => void refreshPageStatus();
     const handleUpdated = () => void refreshPageStatus();
@@ -117,48 +150,97 @@ export function App() {
     }, 250);
 
     return () => window.clearTimeout(timeout);
-  }, [activeWorkspaceId, authSession, platformFilter, query, recentDays, tagFilter]);
+  }, [
+    activeWorkspaceId,
+    authSession,
+    platformFilter,
+    query,
+    recentDays,
+    tagFilter,
+  ]);
+
+  useEffect(() => {
+    if (authSession) return;
+    const update = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      area: string,
+    ) => {
+      if (
+        area === "local" &&
+        Object.keys(changes).some(
+          (key) =>
+            key.startsWith("context_kit.package.") ||
+            key === "context_bridge.packages",
+        )
+      ) {
+        void getPackages()
+          .then(setPackages)
+          .catch(() =>
+            setStatus({
+              tone: "error",
+              text: "Could not refresh the local library.",
+            }),
+          );
+      }
+    };
+    chrome.storage.onChanged.addListener(update);
+    return () => chrome.storage.onChanged.removeListener(update);
+  }, [authSession]);
 
   const filteredPackages = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return packages.filter((contextPackage) => {
-      const matchesText = !normalized
-        || [
-            contextPackage.title,
-            contextPackage.summary,
-            contextPackage.tags.join(" "),
-          ]
-            .join(" ")
-            .toLowerCase()
-            .includes(normalized);
+      const matchesText =
+        !normalized ||
+        [
+          contextPackage.title,
+          contextPackage.summary,
+          contextPackage.tags.join(" "),
+          contextPackage.notes,
+          ...contextPackage.messages.map((message) => message.content),
+          ...(contextPackage.assets ?? []).map(
+            (asset) => `${asset.name} ${asset.text ?? ""}`,
+          ),
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(normalized);
       const matchesPlatform =
         platformFilter === "all" || contextPackage.platform === platformFilter;
       const matchesTag =
-        !tagFilter.trim()
-        || contextPackage.tags.some((item) => item.toLowerCase() === tagFilter.trim().toLowerCase());
+        !tagFilter.trim() ||
+        contextPackage.tags.some(
+          (item) => item.toLowerCase() === tagFilter.trim().toLowerCase(),
+        );
       const matchesRecent =
-        !recentDays
-        || Date.now() - new Date(contextPackage.updatedAt).getTime() <= Number(recentDays) * 24 * 60 * 60 * 1000;
+        !recentDays ||
+        Date.now() - new Date(contextPackage.updatedAt).getTime() <=
+          Number(recentDays) * 24 * 60 * 60 * 1000;
 
       return matchesText && matchesPlatform && matchesTag && matchesRecent;
     });
   }, [packages, platformFilter, query, recentDays, tagFilter]);
 
   const activeWorkspace = useMemo(
-    () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null,
+    () =>
+      workspaces.find((workspace) => workspace.id === activeWorkspaceId) ??
+      null,
     [activeWorkspaceId, workspaces],
   );
 
   const workspaceNameById = useMemo(
     () =>
-      Object.fromEntries(workspaces.map((workspace) => [workspace.id, workspace.name])),
+      Object.fromEntries(
+        workspaces.map((workspace) => [workspace.id, workspace.name]),
+      ),
     [workspaces],
   );
 
   const availableTags = useMemo(
     () =>
-      [...new Set(packages.flatMap((contextPackage) => contextPackage.tags))]
-        .sort((left, right) => left.localeCompare(right)),
+      [
+        ...new Set(packages.flatMap((contextPackage) => contextPackage.tags)),
+      ].sort((left, right) => left.localeCompare(right)),
     [packages],
   );
 
@@ -212,12 +294,16 @@ export function App() {
     }
   }
 
-  async function refreshCloudState(session: AuthSession, preferredWorkspaceId: string | null) {
+  async function refreshCloudState(
+    session: AuthSession,
+    preferredWorkspaceId: string | null,
+  ) {
     const nextWorkspaces = await listWorkspaces(session);
     setWorkspaces(nextWorkspaces);
 
     const resolvedWorkspaceId =
-      preferredWorkspaceId && nextWorkspaces.some((workspace) => workspace.id === preferredWorkspaceId)
+      preferredWorkspaceId &&
+      nextWorkspaces.some((workspace) => workspace.id === preferredWorkspaceId)
         ? preferredWorkspaceId
         : null;
 
@@ -233,7 +319,10 @@ export function App() {
     setPackageVersions([]);
   }
 
-  async function refreshRemotePackages(session: AuthSession, workspaceId: string | null = activeWorkspaceId) {
+  async function refreshRemotePackages(
+    session: AuthSession,
+    workspaceId: string | null = activeWorkspaceId,
+  ) {
     const items = await listRemotePackages(session, workspaceId, {
       query,
       platform: platformFilter === "all" ? "" : platformFilter,
@@ -243,7 +332,10 @@ export function App() {
     setPackages(items);
   }
 
-  async function refreshWorkspaceMembers(session: AuthSession, workspaceId: string | null = activeWorkspaceId) {
+  async function refreshWorkspaceMembers(
+    session: AuthSession,
+    workspaceId: string | null = activeWorkspaceId,
+  ) {
     if (!workspaceId) {
       setWorkspaceMembers([]);
       return;
@@ -267,14 +359,20 @@ export function App() {
         platform: "unsupported",
         title: "Current page unavailable",
         url: "",
-        reason: error instanceof Error ? error.message : "Open ChatGPT or Gemini and try again.",
+        reason:
+          error instanceof Error
+            ? error.message
+            : "Open ChatGPT or Gemini and try again.",
       });
     }
   }
 
   async function handleLogin() {
     setIsAuthWorking(true);
-    setStatus({ tone: "neutral", text: "Signing in to the local Context Kit API..." });
+    setStatus({
+      tone: "neutral",
+      text: "Signing in to the local Context Kit API...",
+    });
 
     try {
       const session = await loginToBackend(authDraft);
@@ -288,7 +386,10 @@ export function App() {
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to sign in to the backend.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to sign in to the backend.",
       });
     } finally {
       setIsAuthWorking(false);
@@ -315,7 +416,10 @@ export function App() {
       setWorkspaceMembers([]);
       setPackageVersions([]);
       await refreshLocalPackages();
-      setStatus({ tone: "neutral", text: "Signed out. Back in local-only mode." });
+      setStatus({
+        tone: "neutral",
+        text: "Signed out. Back in local-only mode.",
+      });
       setIsAuthWorking(false);
     }
   }
@@ -334,7 +438,10 @@ export function App() {
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to refresh cloud packages.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to refresh cloud packages.",
       });
     } finally {
       setIsAuthWorking(false);
@@ -361,7 +468,10 @@ export function App() {
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to switch workspaces.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to switch workspaces.",
       });
     } finally {
       setIsAuthWorking(false);
@@ -369,14 +479,20 @@ export function App() {
   }
 
   async function handleCreateWorkspace() {
-    if (!authSession || !appConfig.enableCloudSync || !workspaceNameDraft.trim()) {
+    if (
+      !authSession ||
+      !appConfig.enableCloudSync ||
+      !workspaceNameDraft.trim()
+    ) {
       return;
     }
 
     setIsAuthWorking(true);
     try {
       const created = await createWorkspace(authSession, workspaceNameDraft);
-      const nextWorkspaces = [...workspaces, created].sort((left, right) => left.name.localeCompare(right.name));
+      const nextWorkspaces = [...workspaces, created].sort((left, right) =>
+        left.name.localeCompare(right.name),
+      );
       setWorkspaces(nextWorkspaces);
       setWorkspaceNameDraft("");
       await handleWorkspaceChange(created.id);
@@ -387,7 +503,10 @@ export function App() {
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to create workspace.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to create workspace.",
       });
     } finally {
       setIsAuthWorking(false);
@@ -406,7 +525,10 @@ export function App() {
 
     setIsAuthWorking(true);
     try {
-      await inviteWorkspaceMember(authSession, activeWorkspaceId, { email, role: "member" });
+      await inviteWorkspaceMember(authSession, activeWorkspaceId, {
+        email,
+        role: "member",
+      });
       await refreshWorkspaceMembers(authSession, activeWorkspaceId);
       setStatus({
         tone: "success",
@@ -415,7 +537,10 @@ export function App() {
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to invite workspace member.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to invite workspace member.",
       });
     } finally {
       setIsAuthWorking(false);
@@ -431,11 +556,21 @@ export function App() {
     try {
       const localPackages = await getPackages();
       if (!localPackages.length) {
-        setStatus({ tone: "warning", text: "There are no local packages to upload." });
+        setStatus({
+          tone: "warning",
+          text: "There are no local packages to upload.",
+        });
         return;
       }
 
-      await importRemotePackages(authSession, localPackages.map((item) => applyWorkspaceDefaults(item)));
+      if (localPackages.some((item) => item.assets?.length))
+        throw new Error(
+          "The development cloud does not support attachments. Use a local JSON backup to transfer these packages.",
+        );
+      await importRemotePackages(
+        authSession,
+        localPackages.map((item) => applyWorkspaceDefaults(item)),
+      );
       await refreshRemotePackages(authSession);
       setStatus({
         tone: "success",
@@ -444,16 +579,22 @@ export function App() {
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to upload local packages.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to upload local packages.",
       });
     } finally {
       setIsAuthWorking(false);
     }
   }
 
-  async function handleSaveCurrentConversation() {
+  async function handleSaveCurrentConversation(quick = false) {
     setIsWorking(true);
-    setStatus({ tone: "neutral", text: "Extracting the current conversation..." });
+    setStatus({
+      tone: "neutral",
+      text: "Extracting the current conversation...",
+    });
 
     try {
       const conversation = await extractConversation();
@@ -462,8 +603,64 @@ export function App() {
       }
 
       const draft = createDraftFromConversation(conversation);
+      const sourcePath = new URL(conversation.url).pathname;
+      const existing =
+        sourcePath !== "/" && sourcePath !== "/app"
+          ? packages.find((item) => item.sourceUrl === conversation.url)
+          : undefined;
+      if (existing) {
+        draft.editingPackageId = existing.id;
+        draft.title = existing.title;
+        draft.summary = existing.summary || draft.summary;
+        draft.keyDecisions = existing.keyDecisions.length
+          ? existing.keyDecisions
+          : draft.keyDecisions;
+        draft.constraints = existing.constraints.length
+          ? existing.constraints
+          : draft.constraints;
+        draft.openQuestions = existing.openQuestions.length
+          ? existing.openQuestions
+          : draft.openQuestions;
+        draft.tags = [...new Set([...existing.tags, ...draft.tags])];
+        draft.notes = existing.notes || draft.notes;
+        draft.assets = [
+          ...(existing.assets ?? []),
+          ...(draft.assets ?? []).filter(
+            (asset) =>
+              !(existing.assets ?? []).some(
+                (saved) => saved.sourceUrl === asset.sourceUrl,
+              ),
+          ),
+        ];
+      }
+      const preservesHistory =
+        !existing ||
+        existing.messages.every(
+          (message, index) =>
+            draft.messages[index]?.role === message.role &&
+            draft.messages[index]?.content === message.content,
+        );
+      if (quick && preservesHistory && !draft.sensitiveFindings.length) {
+        if (
+          existing &&
+          existing.messages.length === draft.messages.length &&
+          (existing.assets?.length ?? 0) === (draft.assets?.length ?? 0)
+        ) {
+          await openPackageDetail(existing);
+          setStatus({
+            tone: "success",
+            text: "Already saved. Your existing notes and edits are intact.",
+          });
+        } else await handleSaveDraft(draft, existing);
+        return;
+      }
+      if (!preservesHistory)
+        draft.reviewWarnings.push(
+          "This capture differs from the saved transcript. The page may not have loaded earlier messages. Review before replacing it.",
+        );
+      await saveActiveDraft(draft);
       setSavedDraft(draft);
-      setView({ name: "create", draft, existingPackage: undefined });
+      setView({ name: "create", draft, existingPackage: existing });
       setStatus({
         tone: draft.reviewWarnings.length ? "warning" : "success",
         text: draft.reviewWarnings.length
@@ -473,7 +670,10 @@ export function App() {
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Conversation extraction failed.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Conversation extraction failed.",
       });
     } finally {
       setIsWorking(false);
@@ -489,10 +689,13 @@ export function App() {
       const draft = createDraftFromSelection(selection);
 
       if (!draft.messages.length) {
-        throw new Error("No useful text was captured. Highlight part of the conversation and try again.");
+        throw new Error(
+          "No useful text was captured. Highlight part of the conversation and try again.",
+        );
       }
 
       setSavedDraft(draft);
+      await saveActiveDraft(draft);
       setView({ name: "create", draft, existingPackage: undefined });
       setStatus({
         tone: "warning",
@@ -511,13 +714,24 @@ export function App() {
     }
   }
 
-  async function handleSaveDraft(draft: ContextDraft, existingPackage?: ContextPackage) {
+  async function handleSaveDraft(
+    draft: ContextDraft,
+    existingPackage?: ContextPackage,
+  ) {
     const basePackage = materializePackage(draft, existingPackage);
-    const contextPackage = authSession ? applyWorkspaceDefaults(basePackage, existingPackage) : basePackage;
+    if (existingPackage && !authSession)
+      basePackage.currentVersion = (existingPackage.currentVersion ?? 1) + 1;
+    const contextPackage = authSession
+      ? applyWorkspaceDefaults(basePackage, existingPackage)
+      : basePackage;
 
     try {
       let nextPackages: ContextPackage[];
       if (authSession && appConfig.enableCloudSync) {
+        if (contextPackage.assets?.length)
+          throw new Error(
+            "Attachments require local mode. Your draft is safe: go back, sign out in Settings, then resume the draft to save it locally.",
+          );
         const savedRemote = existingPackage
           ? await updateRemotePackage(authSession, contextPackage)
           : await createRemotePackage(authSession, contextPackage);
@@ -529,10 +743,14 @@ export function App() {
       setPackages(nextPackages);
       await clearActiveDraft();
       setSavedDraft(null);
-      const nextDetail = nextPackages.find((item) => item.id === contextPackage.id) ?? contextPackage;
+      const nextDetail =
+        nextPackages.find((item) => item.id === contextPackage.id) ??
+        contextPackage;
       setView({ name: "detail", contextPackage: nextDetail });
       if (authSession && appConfig.enableCloudSync) {
-        setPackageVersions(await listPackageVersions(authSession, nextDetail.id));
+        setPackageVersions(
+          await listPackageVersions(authSession, nextDetail.id),
+        );
       }
       setStatus({
         tone: "success",
@@ -547,7 +765,10 @@ export function App() {
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to save the package.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to save the package.",
       });
     }
   }
@@ -565,24 +786,41 @@ export function App() {
       setView({ name: "home" });
       setStatus({
         tone: "success",
-        text: authSession ? "Context Package deleted from the cloud." : "Context Package deleted.",
+        text: authSession
+          ? "Context Package deleted from the cloud."
+          : "Context Package deleted.",
       });
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to delete the package.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to delete the package.",
       });
     }
   }
 
-  async function handleInsert(contextPackage: ContextPackage, options: RenderOptions) {
+  async function handleInsert(
+    contextPackage: ContextPackage,
+    options: RenderOptions,
+  ) {
     const rendered = renderContextPackage(contextPackage, options);
 
     try {
       await insertRenderedContext(rendered);
-      setStatus({ tone: "success", text: "Rendered context inserted into the current AI tool." });
+      setStatus({
+        tone: "success",
+        text: "Rendered context inserted into the current AI tool.",
+      });
     } catch (error) {
-      await navigator.clipboard.writeText(rendered);
+      try {
+        await navigator.clipboard.writeText(rendered);
+      } catch {
+        throw new Error(
+          "Insertion and clipboard access failed. Select and copy the text in the preview below.",
+        );
+      }
       setStatus({
         tone: "warning",
         text:
@@ -593,17 +831,28 @@ export function App() {
     }
   }
 
-  function handleExport(contextPackage: ContextPackage) {
-    const blob = new Blob([JSON.stringify(contextPackage, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${slugify(contextPackage.title)}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    setStatus({ tone: "success", text: "Context Package exported as JSON." });
+  async function handleExport(contextPackage?: ContextPackage) {
+    setIsWorking(true);
+    try {
+      const text = await exportBackup(
+        contextPackage ? [contextPackage] : packages,
+      );
+      downloadBlob(
+        new Blob([text], { type: "application/json" }),
+        `${contextPackage ? slugify(contextPackage.title) : "context-kit-library"}.json`,
+      );
+      setStatus({
+        tone: "success",
+        text: "Backup exported, including original files. API keys are never exported.",
+      });
+    } catch (error) {
+      setStatus({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Export failed.",
+      });
+    } finally {
+      setIsWorking(false);
+    }
   }
 
   async function handleImportFile(event: React.ChangeEvent<HTMLInputElement>) {
@@ -613,12 +862,20 @@ export function App() {
     }
 
     try {
+      if (file.size > 100 * 1024 * 1024)
+        throw new Error("Choose a backup under 100 MB.");
       const text = await file.text();
-      const parsed = JSON.parse(text);
-      const items = (Array.isArray(parsed) ? parsed : [parsed]) as ContextPackage[];
+      const items = await readBackup(text);
 
       if (authSession && appConfig.enableCloudSync) {
-        const synced = await importRemotePackages(authSession, items.map((item) => applyWorkspaceDefaults(item)));
+        if (items.some((item) => item.assets?.length))
+          throw new Error(
+            "This backup contains files. Sign out in Settings and import it into your local library.",
+          );
+        const synced = await importRemotePackages(
+          authSession,
+          items.map((item) => applyWorkspaceDefaults(item)),
+        );
         setPackages((current) => mergeLists(current, synced));
         setStatus({
           tone: "success",
@@ -652,24 +909,36 @@ export function App() {
     }
 
     try {
-      setPackageVersions(await listPackageVersions(authSession, contextPackage.id));
+      setPackageVersions(
+        await listPackageVersions(authSession, contextPackage.id),
+      );
     } catch (error) {
       setPackageVersions([]);
       setStatus({
         tone: "warning",
-        text: error instanceof Error ? error.message : "Failed to load version history.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to load version history.",
       });
     }
   }
 
-  async function handleRestoreVersion(contextPackage: ContextPackage, versionId: string) {
+  async function handleRestoreVersion(
+    contextPackage: ContextPackage,
+    versionId: string,
+  ) {
     if (!authSession || !appConfig.enableCloudSync) {
       return;
     }
 
     setIsWorking(true);
     try {
-      const restored = await restorePackageVersion(authSession, contextPackage.id, versionId);
+      const restored = await restorePackageVersion(
+        authSession,
+        contextPackage.id,
+        versionId,
+      );
       setPackages((current) => upsertInList(current, restored));
       setView({ name: "detail", contextPackage: restored });
       setPackageVersions(await listPackageVersions(authSession, restored.id));
@@ -680,20 +949,33 @@ export function App() {
     } catch (error) {
       setStatus({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to restore the selected version.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to restore the selected version.",
       });
     } finally {
       setIsWorking(false);
     }
   }
 
-  function applyWorkspaceDefaults(contextPackage: ContextPackage, existingPackage?: ContextPackage): ContextPackage {
+  function applyWorkspaceDefaults(
+    contextPackage: ContextPackage,
+    existingPackage?: ContextPackage,
+  ): ContextPackage {
     if (!authSession || !appConfig.enableCloudSync) {
       return contextPackage;
     }
 
-    const workspaceId = existingPackage?.workspaceId ?? contextPackage.workspaceId ?? activeWorkspaceId ?? null;
-    const visibility = existingPackage?.visibility ?? contextPackage.visibility ?? (workspaceId ? "team" : "private");
+    const workspaceId =
+      existingPackage?.workspaceId ??
+      contextPackage.workspaceId ??
+      activeWorkspaceId ??
+      null;
+    const visibility =
+      existingPackage?.visibility ??
+      contextPackage.visibility ??
+      (workspaceId ? "team" : "private");
 
     return {
       ...contextPackage,
@@ -704,24 +986,31 @@ export function App() {
 
   if (view.name === "create") {
     return (
-      <CreatePackage
-        draft={view.draft}
-        existingPackage={view.existingPackage}
-        availablePackages={packages}
-        onCancel={() => setView({ name: "home" })}
-        onDraftChange={(draft) => {
-          setSavedDraft(draft);
-          void saveActiveDraft(draft);
-        }}
-        onSave={(draft) => handleSaveDraft(draft, view.existingPackage)}
-        onUseExistingPackage={(contextPackage) =>
-          setView({
-            name: "create",
-            draft: view.draft,
-            existingPackage: contextPackage,
-          })
-        }
-      />
+      <main className="app-shell editor-shell">
+        {status.text && (
+          <div
+            className={`status-banner status-banner--${status.tone}`}
+            role="status"
+          >
+            {status.text}
+          </div>
+        )}
+        <CreatePackage
+          draft={view.draft}
+          existingPackage={view.existingPackage}
+          availablePackages={packages}
+          onCancel={() => setView({ name: "home" })}
+          onDraftChange={persistDraft}
+          onSave={(draft) => handleSaveDraft(draft, view.existingPackage)}
+          onUseExistingPackage={(contextPackage, currentDraft) =>
+            setView({
+              name: "create",
+              draft: { ...currentDraft, editingPackageId: contextPackage.id },
+              existingPackage: contextPackage,
+            })
+          }
+        />
+      </main>
     );
   }
 
@@ -733,322 +1022,418 @@ export function App() {
       !!authSession && (!activeWorkspace || activeWorkspace.role !== "viewer");
 
     return (
-      <PackageDetail
-        contextPackage={view.contextPackage}
-        workspaceName={workspaceName}
-        versions={packageVersions}
-        canRestoreVersions={canRestoreVersions}
-        onBack={() => setView({ name: "home" })}
-        onDelete={handleDelete}
-        onEdit={(contextPackage) =>
-          setView({
-            name: "create",
-            draft: {
-              title: contextPackage.title,
-              platform: contextPackage.platform,
-              sourceUrl: contextPackage.sourceUrl,
-              summary: contextPackage.summary,
-              keyDecisions: contextPackage.keyDecisions,
-              constraints: contextPackage.constraints,
-              openQuestions: contextPackage.openQuestions,
-              tags: contextPackage.tags,
-              sensitiveFindings: contextPackage.sensitiveFindings,
-              messages: contextPackage.messages,
-              depth: contextPackage.depth,
-              notes: contextPackage.notes,
-              extractionConfidence: contextPackage.extractionConfidence,
-              reviewWarnings: contextPackage.reviewWarnings,
-            },
-            existingPackage: contextPackage,
-          })
-        }
-        onInsert={handleInsert}
-        onExport={handleExport}
-        onRestoreVersion={(versionId) => handleRestoreVersion(view.contextPackage, versionId)}
-      />
+      <main className="app-shell editor-shell">
+        {status.text && (
+          <div
+            className={`status-banner status-banner--${status.tone}`}
+            role="status"
+          >
+            {status.text}
+          </div>
+        )}
+        <PackageDetail
+          key={view.contextPackage.id}
+          contextPackage={view.contextPackage}
+          workspaceName={workspaceName}
+          versions={packageVersions}
+          canRestoreVersions={canRestoreVersions}
+          onBack={() => setView({ name: "home" })}
+          onDelete={handleDelete}
+          onEdit={(contextPackage) =>
+            setView({
+              name: "create",
+              draft: {
+                assets: contextPackage.assets,
+                editingPackageId: contextPackage.id,
+                title: contextPackage.title,
+                platform: contextPackage.platform,
+                sourceUrl: contextPackage.sourceUrl,
+                summary: contextPackage.summary,
+                keyDecisions: contextPackage.keyDecisions,
+                constraints: contextPackage.constraints,
+                openQuestions: contextPackage.openQuestions,
+                tags: contextPackage.tags,
+                sensitiveFindings: contextPackage.sensitiveFindings,
+                messages: contextPackage.messages,
+                depth: contextPackage.depth,
+                notes: contextPackage.notes,
+                extractionConfidence: contextPackage.extractionConfidence,
+                reviewWarnings: contextPackage.reviewWarnings,
+              },
+              existingPackage: contextPackage,
+            })
+          }
+          onInsert={handleInsert}
+          onExport={handleExport}
+          onRestoreVersion={(versionId) =>
+            handleRestoreVersion(view.contextPackage, versionId)
+          }
+        />
+      </main>
     );
   }
 
   return (
     <main className="app-shell">
-      <section className="hero-card">
-        <div className="section-heading">
+      <header className="app-header">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">
+            c<span>k</span>
+          </span>
           <div>
-            <p className="eyebrow">Context Kit</p>
-            <h1>Project Memory for AI Tools</h1>
-          </div>
-          <button className="ghost-button" onClick={() => void refreshPageStatus()} type="button">
-            Refresh
-          </button>
-        </div>
-        <div className={`status-banner status-banner--${status.tone}`}>
-          <p className="hero-copy">{status.text}</p>
-        </div>
-        <div className="status-card">
-          <span className="status-dot" data-supported={pageStatus.isSupported} />
-          <div>
-            <strong>{pageStatus.title}</strong>
-            <p>
-              {pageStatus.isSupported
-                ? `Supported page detected: ${pageStatus.platform}`
-                : pageStatus.reason ?? "Open ChatGPT or Gemini to start capturing context."}
-            </p>
+            <strong>Context Kit</strong>
+            <small>A little continuity.</small>
           </div>
         </div>
-        {!pageStatus.isSupported && (
-          <div className="tip-card">
-            <strong>Manual fallback still works</strong>
-            <p>
-              Open a supported AI tab for full extraction, or use Manual Context / Selected Text
-              capture on the content you want to keep.
-            </p>
-          </div>
-        )}
-        <div className="action-row">
-          <button
-            className="primary-button"
-            disabled={!pageStatus.isSupported || isWorking}
-            onClick={() => void handleSaveCurrentConversation()}
-            type="button"
-          >
-            {isWorking ? "Reading Conversation..." : "Save This Conversation"}
-          </button>
-          <button
-            className="ghost-button"
-            onClick={() =>
-              setView({ name: "create", draft: createManualDraft(), existingPackage: undefined })
-            }
-            type="button"
-          >
-            Create Manual Context
-          </button>
-          <button
-            className="ghost-button"
-            disabled={isWorking}
-            onClick={() => void handleCaptureSelectedText()}
-            type="button"
-          >
-            Capture Selected Text
-          </button>
+        <span className="local-badge">
+          <span /> On this device
+        </span>
+      </header>
+      <nav className="tab-bar" aria-label="Main navigation">
+        <button
+          aria-current={activeSection === "library" ? "page" : undefined}
+          onClick={() => setActiveSection("library")}
+        >
+          Library <span>{packages.length}</span>
+        </button>
+        <button
+          aria-current={activeSection === "settings" ? "page" : undefined}
+          onClick={() => setActiveSection("settings")}
+        >
+          Settings
+        </button>
+      </nav>
+      {status.text && (
+        <div
+          className={`status-banner status-banner--${status.tone}`}
+          role="status"
+        >
+          {status.text}
         </div>
-      </section>
-
-      <section className="panel-shell">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">{appConfig.enableCloudSync ? "Cloud Sync" : "Publishing Mode"}</p>
-            <h2>
-              {appConfig.enableCloudSync
-                ? authSession
-                  ? "Connected Backend"
-                  : "Sign In to Backend"
-                : "Local-First Store Build"}
-            </h2>
+      )}
+      {activeSection === "settings" && <GeminiSettings />}
+      {activeSection === "library" && (
+        <section className="hero-card">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Keep the thread</p>
+              <h1>
+                Good ideas deserve
+                <br />
+                <em>a little memory.</em>
+              </h1>
+            </div>
+            <button
+              className="ghost-button"
+              onClick={() => void refreshPageStatus()}
+              type="button"
+            >
+              Refresh
+            </button>
           </div>
-        </div>
-
-        {!appConfig.enableCloudSync ? (
-          <div className="detail-card">
-            <p>
-              This publish-safe build keeps Context Kit local-first. Conversation capture, review,
-              redaction, export, and insertion stay available, but cloud sync is intentionally
-              hidden until a production backend and privacy workflow are ready.
-            </p>
-            <div className="tip-card">
-              <strong>Data use summary</strong>
+          <p className="hero-copy">
+            Save the conversation. Bring the context.
+            <br />
+            Pick up exactly where you left off.
+          </p>
+          <div className="status-card">
+            <span
+              className="status-dot"
+              data-supported={pageStatus.isSupported}
+            />
+            <div>
+              <strong>{pageStatus.title}</strong>
               <p>
-                Context Kit reads supported AI pages only when you explicitly capture context, and
-                it stores packages in browser extension storage unless you use a separately enabled
-                backend build.
+                {pageStatus.isSupported
+                  ? `Supported page detected: ${pageStatus.platform}`
+                  : (pageStatus.reason ??
+                    "Open ChatGPT or Gemini to start capturing context.")}
               </p>
             </div>
           </div>
-        ) : authSession ? (
-          <div className="detail-card">
-            <p>
-              Signed in as <strong>{authSession.user.email}</strong>
+          <div className="capture-actions">
+            <button
+              className="primary-button"
+              disabled={!pageStatus.isSupported || isWorking}
+              onClick={() => void handleSaveCurrentConversation(true)}
+            >
+              {isWorking ? "Capturing…" : "Quick save"}
+              <span aria-hidden="true">↗</span>
+            </button>
+            <button
+              className="ghost-button"
+              disabled={!pageStatus.isSupported || isWorking}
+              onClick={() => void handleSaveCurrentConversation()}
+              type="button"
+            >
+              Review & save
+            </button>
+          </div>
+          <div className="action-row secondary-capture">
+            <button
+              className="text-button"
+              onClick={() =>
+                setView({
+                  name: "create",
+                  draft: createManualDraft(),
+                  existingPackage: undefined,
+                })
+              }
+              type="button"
+            >
+              Create Manual Context
+            </button>
+            <button
+              className="text-button"
+              disabled={isWorking}
+              onClick={() => void handleCaptureSelectedText()}
+              type="button"
+            >
+              Capture Selected Text
+            </button>
+          </div>
+          {!pageStatus.isSupported && (
+            <p className="field-help">
+              Open ChatGPT or Gemini for conversation capture. Manual context
+              and selected text work here too.
             </p>
-            <p>API: {authSession.apiBaseUrl}</p>
+          )}
+        </section>
+      )}
 
-            <label className="field">
-              <span>Workspace Scope</span>
-              <select
-                disabled={isAuthWorking}
-                value={activeWorkspaceId ?? ""}
-                onChange={(event) => void handleWorkspaceChange(event.target.value || null)}
-              >
-                <option value="">Personal Library</option>
-                {workspaces.map((workspace) => (
-                  <option key={workspace.id} value={workspace.id}>
-                    {workspace.name} ({workspace.role})
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="field-grid">
-              <label className="field">
-                <span>Create Workspace</span>
-                <input
-                  value={workspaceNameDraft}
-                  onChange={(event) => setWorkspaceNameDraft(event.target.value)}
-                  placeholder="Platform Team"
-                />
-              </label>
-              <div className="field workspace-actions">
-                <span>Team Actions</span>
-                <div className="action-row">
-                  <button
-                    className="ghost-button"
-                    disabled={isAuthWorking || !workspaceNameDraft.trim()}
-                    onClick={() => void handleCreateWorkspace()}
-                    type="button"
-                  >
-                    Create
-                  </button>
-                  <button
-                    className="ghost-button"
-                    disabled={isAuthWorking || !activeWorkspaceId}
-                    onClick={() => void handleInviteMember()}
-                    type="button"
-                  >
-                    Invite Member
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {activeWorkspace && (
-              <div className="tip-card">
-                <strong>{activeWorkspace.name}</strong>
-                <p>
-                  Role: {activeWorkspace.role}. Members: {activeWorkspace.memberCount}. Packages:{" "}
-                  {activeWorkspace.packageCount}.
-                </p>
-                {!!workspaceMembers.length && (
-                  <ul className="inline-list">
-                    {workspaceMembers.map((member) => (
-                      <li key={member.id}>
-                        {member.email} ({member.role})
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-
-            <div className="action-row">
-              <button
-                className="ghost-button"
-                disabled={isAuthWorking}
-                onClick={() => void handleRefreshCloud()}
-                type="button"
-              >
-                Refresh Cloud
-              </button>
-              <button
-                className="ghost-button"
-                disabled={isAuthWorking}
-                onClick={() => void handleSyncLocalToCloud()}
-                type="button"
-              >
-                Upload Local Packages
-              </button>
-              <button
-                className="ghost-button"
-                disabled={isAuthWorking}
-                onClick={() => void handleLogout()}
-                type="button"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="detail-card">
-            <label className="field">
-              <span>API Base URL</span>
-              <input
-                value={authDraft.apiBaseUrl}
-                onChange={(event) =>
-                  setAuthDraft((current) => ({ ...current, apiBaseUrl: event.target.value }))
-                }
-                placeholder="http://127.0.0.1:8000"
-              />
-            </label>
-            <label className="field">
-              <span>Email</span>
-              <input
-                value={authDraft.email}
-                onChange={(event) =>
-                  setAuthDraft((current) => ({ ...current, email: event.target.value }))
-                }
-                placeholder="you@example.com"
-              />
-            </label>
-            <label className="field">
-              <span>Name</span>
-              <input
-                value={authDraft.name}
-                onChange={(event) =>
-                  setAuthDraft((current) => ({ ...current, name: event.target.value }))
-                }
-                placeholder="Optional display name"
-              />
-            </label>
-            <div className="action-row">
-              <button
-                className="primary-button"
-                disabled={isAuthWorking || !authDraft.email.trim()}
-                onClick={() => void handleLogin()}
-                type="button"
-              >
-                {isAuthWorking ? "Signing In..." : "Sign In to Cloud"}
-              </button>
-            </div>
-          </div>
-        )}
-      </section>
-
-      <section className="panel-shell">
-        <div className="detail-card">
+      {activeSection === "settings" && appConfig.enableCloudSync && (
+        <section className="panel-shell">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">Transparency</p>
-              <h2>Privacy and Support</h2>
+              <p className="eyebrow">Cloud Sync</p>
+              <h2>
+                {authSession ? "Connected Backend" : "Sign In to Backend"}
+              </h2>
             </div>
           </div>
-          <p>
-            Context Kit captures conversation content only on supported AI pages and only after an
-            explicit user action such as saving a conversation or capturing selected text.
-          </p>
-          <div className="link-row">
-            {appConfig.privacyPolicyUrl ? (
-              <a className="ghost-link" href={appConfig.privacyPolicyUrl} rel="noreferrer" target="_blank">
-                Privacy Policy
-              </a>
-            ) : null}
-            {appConfig.supportUrl ? (
-              <a className="ghost-link" href={appConfig.supportUrl} rel="noreferrer" target="_blank">
-                Support
-              </a>
-            ) : null}
-            {appConfig.officialSiteUrl ? (
-              <a className="ghost-link" href={appConfig.officialSiteUrl} rel="noreferrer" target="_blank">
-                Official Site
-              </a>
+
+          {authSession ? (
+            <div className="detail-card">
+              <p>
+                Signed in as <strong>{authSession.user.email}</strong>
+              </p>
+              <p>API: {authSession.apiBaseUrl}</p>
+
+              <label className="field">
+                <span>Workspace Scope</span>
+                <select
+                  disabled={isAuthWorking}
+                  value={activeWorkspaceId ?? ""}
+                  onChange={(event) =>
+                    void handleWorkspaceChange(event.target.value || null)
+                  }
+                >
+                  <option value="">Personal Library</option>
+                  {workspaces.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>
+                      {workspace.name} ({workspace.role})
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="field-grid">
+                <label className="field">
+                  <span>Create Workspace</span>
+                  <input
+                    value={workspaceNameDraft}
+                    onChange={(event) =>
+                      setWorkspaceNameDraft(event.target.value)
+                    }
+                    placeholder="Platform Team"
+                  />
+                </label>
+                <div className="field workspace-actions">
+                  <span>Team Actions</span>
+                  <div className="action-row">
+                    <button
+                      className="ghost-button"
+                      disabled={isAuthWorking || !workspaceNameDraft.trim()}
+                      onClick={() => void handleCreateWorkspace()}
+                      type="button"
+                    >
+                      Create
+                    </button>
+                    <button
+                      className="ghost-button"
+                      disabled={isAuthWorking || !activeWorkspaceId}
+                      onClick={() => void handleInviteMember()}
+                      type="button"
+                    >
+                      Invite Member
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {activeWorkspace && (
+                <div className="tip-card">
+                  <strong>{activeWorkspace.name}</strong>
+                  <p>
+                    Role: {activeWorkspace.role}. Members:{" "}
+                    {activeWorkspace.memberCount}. Packages:{" "}
+                    {activeWorkspace.packageCount}.
+                  </p>
+                  {!!workspaceMembers.length && (
+                    <ul className="inline-list">
+                      {workspaceMembers.map((member) => (
+                        <li key={member.id}>
+                          {member.email} ({member.role})
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              <div className="action-row">
+                <button
+                  className="ghost-button"
+                  disabled={isAuthWorking}
+                  onClick={() => void handleRefreshCloud()}
+                  type="button"
+                >
+                  Refresh Cloud
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={isAuthWorking}
+                  onClick={() => void handleSyncLocalToCloud()}
+                  type="button"
+                >
+                  Upload Local Packages
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={isAuthWorking}
+                  onClick={() => void handleLogout()}
+                  type="button"
+                >
+                  Sign Out
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="detail-card">
+              <label className="field">
+                <span>API Base URL</span>
+                <input
+                  value={authDraft.apiBaseUrl}
+                  onChange={(event) =>
+                    setAuthDraft((current) => ({
+                      ...current,
+                      apiBaseUrl: event.target.value,
+                    }))
+                  }
+                  placeholder="http://127.0.0.1:8000"
+                />
+              </label>
+              <label className="field">
+                <span>Email</span>
+                <input
+                  value={authDraft.email}
+                  onChange={(event) =>
+                    setAuthDraft((current) => ({
+                      ...current,
+                      email: event.target.value,
+                    }))
+                  }
+                  placeholder="you@example.com"
+                />
+              </label>
+              <label className="field">
+                <span>Name</span>
+                <input
+                  value={authDraft.name}
+                  onChange={(event) =>
+                    setAuthDraft((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
+                  }
+                  placeholder="Optional display name"
+                />
+              </label>
+              <div className="action-row">
+                <button
+                  className="primary-button"
+                  disabled={isAuthWorking || !authDraft.email.trim()}
+                  onClick={() => void handleLogin()}
+                  type="button"
+                >
+                  {isAuthWorking ? "Signing In..." : "Sign In to Cloud"}
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {activeSection === "settings" && (
+        <section className="panel-shell">
+          <div className="detail-card">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Transparency</p>
+                <h2>Privacy and Support</h2>
+              </div>
+            </div>
+            <p>
+              Context Kit captures conversation content only on supported AI
+              pages and only after an explicit user action such as saving a
+              conversation or capturing selected text.
+            </p>
+            <div className="link-row">
+              {appConfig.privacyPolicyUrl ? (
+                <a
+                  className="ghost-link"
+                  href={appConfig.privacyPolicyUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Privacy Policy
+                </a>
+              ) : null}
+              {appConfig.supportUrl ? (
+                <a
+                  className="ghost-link"
+                  href={appConfig.supportUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Support
+                </a>
+              ) : null}
+              {appConfig.officialSiteUrl ? (
+                <a
+                  className="ghost-link"
+                  href={appConfig.officialSiteUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Official Site
+                </a>
+              ) : null}
+            </div>
+            {!appConfig.privacyPolicyUrl &&
+            !appConfig.supportUrl &&
+            !appConfig.officialSiteUrl ? (
+              <p>
+                Saved conversations and files stay on this device. Gemini is
+                optional; only AI actions send content to Google. Remove your
+                keys in Settings to disconnect it.
+              </p>
             ) : null}
           </div>
-          {!appConfig.privacyPolicyUrl && !appConfig.supportUrl && !appConfig.officialSiteUrl ? (
-            <p>
-              Public privacy, support, and official-site URLs are configured at release time for
-              the Chrome Web Store listing.
-            </p>
-          ) : null}
-        </div>
-      </section>
+        </section>
+      )}
 
-      {savedDraft && (
+      {activeSection === "library" && savedDraft && (
         <section className="panel-shell">
           <div className="warning-card">
             <div className="section-heading">
@@ -1061,7 +1446,15 @@ export function App() {
             <div className="action-row">
               <button
                 className="primary-button"
-                onClick={() => setView({ name: "create", draft: savedDraft, existingPackage: undefined })}
+                onClick={() =>
+                  setView({
+                    name: "create",
+                    draft: savedDraft,
+                    existingPackage: packages.find(
+                      (item) => item.id === savedDraft.editingPackageId,
+                    ),
+                  })
+                }
                 type="button"
               >
                 Resume Draft
@@ -1071,7 +1464,10 @@ export function App() {
                 onClick={() => {
                   setSavedDraft(null);
                   void clearActiveDraft();
-                  setStatus({ tone: "neutral", text: "Unsaved draft discarded." });
+                  setStatus({
+                    tone: "neutral",
+                    text: "Unsaved draft discarded.",
+                  });
                 }}
                 type="button"
               >
@@ -1082,83 +1478,114 @@ export function App() {
         </section>
       )}
 
-      <section className="panel-shell">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">
-              {authSession ? (activeWorkspace ? "Workspace Library" : "Personal Cloud Library") : "Local Library"}
-            </p>
-            <h2>
-              {authSession
-                ? activeWorkspace
-                  ? `${activeWorkspace.name} Packages`
-                  : "Your Cloud Packages"
-                : "Your Context Packages"}
-            </h2>
+      {activeSection === "library" && (
+        <section className="panel-shell library-panel">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">
+                {authSession
+                  ? activeWorkspace
+                    ? "Workspace Library"
+                    : "Personal Cloud Library"
+                  : "Local Library"}
+              </p>
+              <h2>
+                {authSession
+                  ? activeWorkspace
+                    ? `${activeWorkspace.name} Packages`
+                    : "Your Cloud Packages"
+                  : "Saved for later"}
+              </h2>
+            </div>
+            <div className="action-row action-row--tight">
+              <button
+                className="ghost-button"
+                onClick={() => fileInputRef.current?.click()}
+                type="button"
+              >
+                Import
+              </button>
+              {!!packages.length && (
+                <button
+                  className="ghost-button"
+                  disabled={isWorking}
+                  onClick={() => void handleExport()}
+                >
+                  Back up
+                </button>
+              )}
+            </div>
           </div>
-          <div className="action-row action-row--tight">
-            <button className="ghost-button" onClick={() => fileInputRef.current?.click()} type="button">
-              Import JSON
-            </button>
-          </div>
-        </div>
 
-        <label className="field">
-          <span>Search</span>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={authSession ? "Search by keywords or natural language" : "Search titles, summaries, or tags"}
+          <label className="field">
+            <span>Search</span>
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Find a conversation, idea or file…"
+            />
+          </label>
+
+          <details className="filter-disclosure">
+            <summary>Filter library</summary>
+            <div className="field-grid">
+              <label className="field">
+                <span>Platform</span>
+                <select
+                  value={platformFilter}
+                  onChange={(event) =>
+                    setPlatformFilter(
+                      event.target.value as typeof platformFilter,
+                    )
+                  }
+                >
+                  <option value="all">All platforms</option>
+                  <option value="chatgpt">ChatGPT</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Recent Window</span>
+                <select
+                  value={recentDays}
+                  onChange={(event) =>
+                    setRecentDays(event.target.value as typeof recentDays)
+                  }
+                >
+                  <option value="">Any time</option>
+                  <option value="7">Last 7 days</option>
+                  <option value="30">Last 30 days</option>
+                  <option value="90">Last 90 days</option>
+                </select>
+              </label>
+            </div>
+
+            <label className="field">
+              <span>Tag Filter</span>
+              <select
+                value={tagFilter}
+                onChange={(event) => setTagFilter(event.target.value)}
+              >
+                <option value="">All tags</option>
+                {availableTags.map((tag) => (
+                  <option key={tag} value={tag}>
+                    {tag}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </details>
+
+          <PackageList
+            packages={filteredPackages}
+            workspaceNameById={workspaceNameById}
+            onSelect={(contextPackage) =>
+              void openPackageDetail(contextPackage)
+            }
           />
-        </label>
-
-        <div className="field-grid">
-          <label className="field">
-            <span>Platform</span>
-            <select
-              value={platformFilter}
-              onChange={(event) =>
-                setPlatformFilter(event.target.value as typeof platformFilter)
-              }
-            >
-              <option value="all">All platforms</option>
-              <option value="chatgpt">ChatGPT</option>
-              <option value="gemini">Gemini</option>
-              <option value="manual">Manual</option>
-            </select>
-          </label>
-          <label className="field">
-            <span>Recent Window</span>
-            <select
-              value={recentDays}
-              onChange={(event) => setRecentDays(event.target.value as typeof recentDays)}
-            >
-              <option value="">Any time</option>
-              <option value="7">Last 7 days</option>
-              <option value="30">Last 30 days</option>
-              <option value="90">Last 90 days</option>
-            </select>
-          </label>
-        </div>
-
-        <label className="field">
-          <span>Tag Filter</span>
-          <select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}>
-            <option value="">All tags</option>
-            {availableTags.map((tag) => (
-              <option key={tag} value={tag}>
-                {tag}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <PackageList
-          packages={filteredPackages}
-          workspaceNameById={workspaceNameById}
-          onSelect={(contextPackage) => void openPackageDetail(contextPackage)}
-        />
-      </section>
+        </section>
+      )}
 
       <input
         ref={fileInputRef}
@@ -1166,6 +1593,7 @@ export function App() {
         hidden
         onChange={handleImportFile}
         type="file"
+        aria-label="Import context backup"
       />
     </main>
   );
@@ -1178,7 +1606,10 @@ function slugify(value: string) {
     .replace(/^-+|-+$/g, "");
 }
 
-function upsertInList(items: ContextPackage[], contextPackage: ContextPackage): ContextPackage[] {
+function upsertInList(
+  items: ContextPackage[],
+  contextPackage: ContextPackage,
+): ContextPackage[] {
   const index = items.findIndex((item) => item.id === contextPackage.id);
   if (index === -1) {
     return sortByUpdatedAt([contextPackage, ...items]);
@@ -1189,7 +1620,10 @@ function upsertInList(items: ContextPackage[], contextPackage: ContextPackage): 
   return sortByUpdatedAt(next);
 }
 
-function mergeLists(current: ContextPackage[], incoming: ContextPackage[]): ContextPackage[] {
+function mergeLists(
+  current: ContextPackage[],
+  incoming: ContextPackage[],
+): ContextPackage[] {
   const byId = new Map<string, ContextPackage>();
   for (const item of [...current, ...incoming]) {
     byId.set(item.id, item);
@@ -1198,5 +1632,7 @@ function mergeLists(current: ContextPackage[], incoming: ContextPackage[]): Cont
 }
 
 function sortByUpdatedAt(items: ContextPackage[]): ContextPackage[] {
-  return [...items].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  return [...items].sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt),
+  );
 }

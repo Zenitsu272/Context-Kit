@@ -1,4 +1,7 @@
-import type { ExtractedConversation, PageStatus } from "../../types/context-package";
+import type {
+  ExtractedConversation,
+  PageStatus,
+} from "../../types/context-package";
 import type { PlatformAdapter } from "./types";
 import {
   buildMessage,
@@ -6,6 +9,7 @@ import {
   dedupeMessages,
   setEditableValue,
   sortByDocumentOrder,
+  collectAssetReferences,
 } from "./shared";
 
 const GEMINI_PROMPT_SELECTORS = [
@@ -29,17 +33,29 @@ function extractGeminiMessages() {
 
   const collected = sortByDocumentOrder(
     candidates.flatMap((candidate) =>
-      [...document.querySelectorAll<HTMLElement>(candidate.selector)].map((element) => ({
-        element,
-        role: candidate.role,
-      })),
+      [...document.querySelectorAll<HTMLElement>(candidate.selector)].map(
+        (element) => ({
+          element,
+          role: candidate.role,
+        }),
+      ),
     ),
+  );
+  const unique = collected.filter(
+    (item, index) =>
+      collected.findIndex((other) => other.element === item.element) ===
+        index &&
+      !collected.some(
+        (other) =>
+          other.element !== item.element &&
+          other.element.contains(item.element),
+      ),
   );
 
   return dedupeMessages(
-    collected
+    unique
       .map(({ element, role }, index) => {
-        const content = cleanText(element.innerText);
+        const content = element.innerText.trim();
         return content ? buildMessage(role, content, index + 1) : null;
       })
       .filter((item): item is NonNullable<typeof item> => Boolean(item)),
@@ -51,8 +67,8 @@ export const geminiAdapter: PlatformAdapter = {
 
   detect() {
     return (
-      window.location.hostname.includes("gemini.google.com") ||
-      window.location.hostname.includes("aistudio.google.com")
+      window.location.hostname === "gemini.google.com" ||
+      window.location.hostname === "aistudio.google.com"
     );
   },
 
@@ -60,7 +76,9 @@ export const geminiAdapter: PlatformAdapter = {
     return {
       isSupported: true,
       platform: "gemini",
-      title: cleanText(document.title.replace(/\s*-\s*Gemini\s*$/i, "")) || "Gemini conversation",
+      title:
+        cleanText(document.title.replace(/\s*-\s*Gemini\s*$/i, "")) ||
+        "Gemini conversation",
       url: window.location.href,
     };
   },
@@ -70,9 +88,13 @@ export const geminiAdapter: PlatformAdapter = {
     const warnings: string[] = [];
 
     if (!messages.length) {
-      warnings.push("No conversation messages were reliably detected from this Gemini page.");
+      warnings.push(
+        "No conversation messages were reliably detected from this Gemini page.",
+      );
     } else if (messages.length < 3) {
-      warnings.push("Only a small portion of the Gemini conversation may have been captured.");
+      warnings.push(
+        "Only a small portion of the Gemini conversation may have been captured.",
+      );
     }
 
     return {
@@ -80,8 +102,14 @@ export const geminiAdapter: PlatformAdapter = {
       title: this.getPageStatus().title,
       url: window.location.href,
       extractedAt: new Date().toISOString(),
-      confidence: messages.length >= 4 ? "medium" : messages.length >= 2 ? "low" : "low",
+      confidence:
+        messages.length >= 4 ? "medium" : messages.length >= 2 ? "low" : "low",
       messages,
+      assets: collectAssetReferences([
+        ...document.querySelectorAll<HTMLElement>(
+          "user-query, model-response, [data-test-id='user-query'], [data-test-id='model-response']",
+        ),
+      ]),
       warnings,
     };
   },
@@ -89,7 +117,9 @@ export const geminiAdapter: PlatformAdapter = {
   async insertIntoPrompt(text: string) {
     const element = GEMINI_PROMPT_SELECTORS.map((selector) =>
       document.querySelector<HTMLElement>(selector),
-    ).find((candidate) => Boolean(candidate) && candidate?.offsetParent !== null);
+    ).find(
+      (candidate) => Boolean(candidate) && candidate?.offsetParent !== null,
+    );
 
     if (!element) {
       throw new Error("Gemini prompt box not found.");

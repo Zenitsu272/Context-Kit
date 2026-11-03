@@ -28,7 +28,9 @@ export async function getCurrentPageStatus(): Promise<PageStatus> {
   }
 
   try {
-    return await sendToActiveTab<PageStatus>(tab.id, { type: "GET_PAGE_STATUS" });
+    return await sendToActiveTab<PageStatus>(tab.id, {
+      type: "GET_PAGE_STATUS",
+    });
   } catch (error) {
     return buildUnavailablePageStatus(tab, error);
   }
@@ -91,9 +93,29 @@ export async function insertRenderedContext(text: string) {
   });
 }
 
-async function sendToActiveTab<T>(tabId: number, message: ContentScriptRequest): Promise<T> {
+async function sendToActiveTab<T>(
+  tabId: number,
+  message: ContentScriptRequest,
+): Promise<T> {
   try {
-    const response = await chrome.tabs.sendMessage(tabId, message);
+    let response;
+    try {
+      response = await chrome.tabs.sendMessage(tabId, message);
+    } catch (error) {
+      if (!isContentScriptUnavailable(error)) throw error;
+      const tab = await chrome.tabs.get(tabId);
+      if (!detectPlatformFromUrl(tab.url)) throw error;
+      const files = [
+        ...new Set(
+          chrome.runtime
+            .getManifest()
+            .content_scripts?.flatMap((script) => script.js ?? []) ?? [],
+        ),
+      ];
+      if (!files.length) throw error;
+      await chrome.scripting.executeScript({ target: { tabId }, files });
+      response = await chrome.tabs.sendMessage(tabId, message);
+    }
     if (!response) {
       throw new Error("No response from content script.");
     }
@@ -126,7 +148,10 @@ async function readSelectedTextFromTab(tabId: number): Promise<string> {
   }
 }
 
-function buildUnavailablePageStatus(tab: chrome.tabs.Tab, error: unknown): PageStatus {
+function buildUnavailablePageStatus(
+  tab: chrome.tabs.Tab,
+  error: unknown,
+): PageStatus {
   const platform = detectPlatformFromUrl(tab.url);
   if (platform) {
     return {
@@ -134,7 +159,8 @@ function buildUnavailablePageStatus(tab: chrome.tabs.Tab, error: unknown): PageS
       platform: "unsupported",
       title: tab.title?.trim() || "Supported page needs refresh",
       url: tab.url ?? "",
-      reason: "This supported tab is still loading or Context Kit has not connected yet. Refresh the page and try again.",
+      reason:
+        "This supported tab is still loading or Context Kit has not connected yet. Refresh the page and try again.",
     };
   }
 
@@ -149,17 +175,22 @@ function buildUnavailablePageStatus(tab: chrome.tabs.Tab, error: unknown): PageS
   };
 }
 
-function detectPlatformFromUrl(url?: string): Exclude<SupportedPlatform, "manual" | "unsupported"> | null {
+function detectPlatformFromUrl(
+  url?: string,
+): Exclude<SupportedPlatform, "manual" | "unsupported"> | null {
   if (!url) {
     return null;
   }
 
   try {
     const hostname = new URL(url).hostname;
-    if (hostname.includes("chatgpt.com") || hostname.includes("chat.openai.com")) {
+    if (hostname === "chatgpt.com" || hostname === "chat.openai.com") {
       return "chatgpt";
     }
-    if (hostname.includes("gemini.google.com") || hostname.includes("aistudio.google.com")) {
+    if (
+      hostname === "gemini.google.com" ||
+      hostname === "aistudio.google.com"
+    ) {
       return "gemini";
     }
   } catch {

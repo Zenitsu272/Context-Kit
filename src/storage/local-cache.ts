@@ -2,48 +2,77 @@ import type { AuthSession } from "../types/auth";
 import type { ContextDraft, ContextPackage } from "../types/context-package";
 
 const STORAGE_KEY = "context_bridge.packages";
+const PACKAGE_PREFIX = "context_kit.package.";
 const DRAFT_KEY = "context_bridge.active_draft";
 const SESSION_KEY = "context_bridge.auth_session";
 const ACTIVE_WORKSPACE_KEY = "context_bridge.active_workspace";
 
 export async function getPackages(): Promise<ContextPackage[]> {
-  const stored = await chrome.storage.local.get(STORAGE_KEY);
-  return sortPackages((stored[STORAGE_KEY] as ContextPackage[] | undefined) ?? []);
+  const stored = await chrome.storage.local.get(null);
+  const byId = new Map<string, ContextPackage>();
+  for (const item of (stored[STORAGE_KEY] as ContextPackage[] | undefined) ??
+    [])
+    byId.set(item.id, item);
+  for (const [key, value] of Object.entries(stored))
+    if (key.startsWith(PACKAGE_PREFIX)) byId.set(value.id, value);
+  return sortPackages([...byId.values()]);
 }
 
-export async function savePackage(nextPackage: ContextPackage): Promise<ContextPackage[]> {
-  const packages = await getPackages();
-  const existingIndex = packages.findIndex((item) => item.id === nextPackage.id);
-
-  if (existingIndex >= 0) {
-    packages[existingIndex] = nextPackage;
-  } else {
-    packages.push(nextPackage);
-  }
-
-  const sorted = sortPackages(packages);
-  await chrome.storage.local.set({ [STORAGE_KEY]: sorted });
-  return sorted;
+export async function savePackage(
+  nextPackage: ContextPackage,
+): Promise<ContextPackage[]> {
+  return navigator.locks.request("context-kit-library", async () => {
+    await migrateLegacyPackages();
+    await chrome.storage.local.set({
+      [PACKAGE_PREFIX + nextPackage.id]: nextPackage,
+    });
+    return getPackages();
+  });
 }
 
 export async function removePackage(id: string): Promise<ContextPackage[]> {
-  const packages = await getPackages();
-  const filtered = packages.filter((item) => item.id !== id);
-  await chrome.storage.local.set({ [STORAGE_KEY]: filtered });
-  return filtered;
+  return navigator.locks.request("context-kit-library", async () => {
+    await migrateLegacyPackages();
+    await chrome.storage.local.remove(PACKAGE_PREFIX + id);
+    return getPackages();
+  });
 }
 
-export async function importPackages(items: ContextPackage[]): Promise<ContextPackage[]> {
-  const current = await getPackages();
-  const merged = new Map<string, ContextPackage>();
+export async function importPackages(
+  items: ContextPackage[],
+): Promise<ContextPackage[]> {
+  return navigator.locks.request("context-kit-library", async () => {
+    await migrateLegacyPackages();
+    // Import as copies when an ID already exists; never overwrite a newer local edit.
+    const current = new Set((await getPackages()).map((item) => item.id));
+    const entries: Record<string, ContextPackage> = {};
+    for (const item of items) {
+      const id = current.has(item.id)
+        ? `ctx_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+        : item.id;
+      current.add(id);
+      entries[PACKAGE_PREFIX + id] = { ...item, id };
+    }
+    await chrome.storage.local.set(entries);
+    return getPackages();
+  });
+}
 
-  for (const item of [...current, ...items]) {
-    merged.set(item.id, item);
-  }
-
-  const packages = sortPackages([...merged.values()]);
-  await chrome.storage.local.set({ [STORAGE_KEY]: packages });
-  return packages;
+async function migrateLegacyPackages() {
+  const stored = await chrome.storage.local.get(STORAGE_KEY);
+  const legacy = stored[STORAGE_KEY] as ContextPackage[] | undefined;
+  if (!legacy) return;
+  const current = await chrome.storage.local.get(
+    legacy.map((item) => PACKAGE_PREFIX + item.id),
+  );
+  const entries = Object.fromEntries(
+    legacy
+      .filter((item) => !current[PACKAGE_PREFIX + item.id])
+      .map((item) => [PACKAGE_PREFIX + item.id, item]),
+  );
+  // Do not remove the legacy data until every record has been committed successfully.
+  await chrome.storage.local.set(entries);
+  await chrome.storage.local.remove(STORAGE_KEY);
 }
 
 export async function getActiveDraft(): Promise<ContextDraft | null> {
@@ -77,7 +106,9 @@ export async function getActiveWorkspaceId(): Promise<string | null> {
   return (stored[ACTIVE_WORKSPACE_KEY] as string | undefined) ?? null;
 }
 
-export async function saveActiveWorkspaceId(workspaceId: string | null): Promise<void> {
+export async function saveActiveWorkspaceId(
+  workspaceId: string | null,
+): Promise<void> {
   if (workspaceId) {
     await chrome.storage.local.set({ [ACTIVE_WORKSPACE_KEY]: workspaceId });
     return;

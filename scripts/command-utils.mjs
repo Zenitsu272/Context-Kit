@@ -15,6 +15,7 @@ export function runCommand(command, args, options = {}) {
       env: options.env ?? process.env,
       stdio: "inherit",
       shell: false,
+      windowsHide: true,
     });
 
     child.on("exit", (code) => {
